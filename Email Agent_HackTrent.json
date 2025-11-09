@@ -1,0 +1,3029 @@
+{
+  "name": "Email Agent - HackTrent",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "get",
+        "messageId": "={{ $json.id }}",
+        "simple": false,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        -3904,
+        1024
+      ],
+      "id": "14d0651f-7c92-434b-acf4-8c90b9873352",
+      "name": "Gmail Get Full",
+      "webhookId": "8849e1d4-292e-4d43-b285-cd3669887d7e"
+    },
+    {
+      "parameters": {
+        "jsCode": "function toHeaderMapFromArray(arr = []) {\n  const m = {};\n  for (const h of arr) {\n    if (!h?.name) continue;\n    m[h.name.toLowerCase()] = (h.value || '').trim();\n  }\n  return m;\n}\nfunction stripHeaderPrefix(v = '') {\n  const idx = v.indexOf(':');\n  if (idx > -1 && idx < 40) {\n    const maybeName = v.slice(0, idx).toLowerCase();\n    if (/^[a-z0-9\\-]+$/.test(maybeName)) return v.slice(idx + 1).trim();\n  }\n  return v.trim();\n}\nfunction toHeaderMapFromObject(obj = {}) {\n  const m = {};\n  for (const [k, raw] of Object.entries(obj)) {\n    const key = k.toLowerCase();\n    m[key] = stripHeaderPrefix(String(raw || ''));\n  }\n  return m;\n}\nfunction decodeBase64Url(s = '') {\n  if (!s) return '';\n  s = s.replace(/-/g, '+').replace(/_/g, '/');\n  const pad = s.length % 4;\n  if (pad) s += '='.repeat(4 - pad);\n  try { return Buffer.from(s, 'base64').toString('utf8'); } catch { return ''; }\n}\nfunction decodeRFC2047(str = '') {\n  if (!str) return '';\n  str = str.replace(/=\\?utf-?8\\?B\\?([^?]+)\\?=/gi, (_, b64) => {\n    try { return Buffer.from(b64, 'base64').toString('utf8'); } catch { return _; }\n  });\n  str = str.replace(/=\\?utf-?8\\?Q\\?([^?]+)\\?=/gi, (_, q) => {\n    const replaced = q.replace(/_/g, ' ').replace(/=([0-9A-F]{2})/gi, (_, hh) => String.fromCharCode(parseInt(hh, 16)));\n    try { return replaced; } catch { return _; }\n  });\n  return str;\n}\nfunction walkParts(part, out) {\n  if (!part) return;\n  const mime = (part.mimeType || '').toLowerCase();\n  if (part.body?.data) {\n    const text = decodeBase64Url(part.body.data);\n    if (mime === 'text/plain') out.plain.push(text);\n    else if (mime === 'text/html') out.html.push(text);\n    else out.other.push({ mime, text });\n  }\n  if (Array.isArray(part.parts)) for (const p of part.parts) walkParts(p, out);\n}\nfunction getBodyFromPayload(payload = {}) {\n  const out = { plain: [], html: [], other: [] };\n  if (payload.body?.data) {\n    const mime = (payload.mimeType || '').toLowerCase();\n    const text = decodeBase64Url(payload.body.data);\n    if (mime === 'text/plain') out.plain.push(text);\n    else if (mime === 'text/html') out.html.push(text);\n    else out.other.push({ mime, text });\n  }\n  if (Array.isArray(payload.parts)) for (const p of payload.parts) walkParts(p, out);\n  const body_full_plain = out.plain.join('\\n\\n').trim();\n  const body_full_html  = out.html.join('\\n\\n').trim();\n  let body_full = body_full_plain;\n  if (!body_full) {\n    body_full = body_full_html\n      .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')\n      .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')\n      .replace(/<[^>]+>/g, ' ')\n      .replace(/\\s+/g, ' ')\n      .trim();\n  }\n  return { body_full, body_full_plain, body_full_html };\n}\nfunction shortSnippet(s = '', n = 160) {\n  return (s || '').replace(/\\s+/g, ' ').slice(0, n);\n}\nfunction hash32(str){\n  let h = 0x811c9dc5;\n  for (let i=0; i<str.length; i++){\n    h ^= str.charCodeAt(i);\n    h += (h<<1) + (h<<4) + (h<<7) + (h<<8) + (h<<24);\n  }\n  return (h>>>0).toString(16);\n}\nfunction pickAddressList(x){\n  if (!x) return '';\n  if (typeof x === 'string') return x;\n  if (Array.isArray(x.value)) {\n    return x.value.map(v => (v.name ? `\"${v.name}\" <${v.address}>` : v.address)).filter(Boolean).join(', ');\n  }\n  if (x.text) return x.text;\n  return '';\n}\nfunction extractOne(msg) {\n  let headersMap = {};\n  if (msg?.payload?.headers) headersMap = toHeaderMapFromArray(msg.payload.headers);\n  else if (msg?.headers && typeof msg.headers === 'object') headersMap = toHeaderMapFromObject(msg.headers);\n\n  const gmail_id  = msg.id || msg.gmail_id || '';\n  const thread_id = msg.threadId || msg.thread_id || '';\n\n  let subject = msg.subject || headersMap['subject'] || '';\n  subject = decodeRFC2047(stripHeaderPrefix(subject));\n\n  const fromStr = pickAddressList(msg.from) || headersMap['from'] || '';\n  const toStr   = pickAddressList(msg.to)   || headersMap['to']   || '';\n  const ccStr   = pickAddressList(msg.cc)   || headersMap['cc']   || '';\n\n  let received_at = msg.date || headersMap['date'] || '';\n  if (received_at && /^\\d{4}-\\d{2}-\\d{2}T/.test(received_at)) {\n    // ISO already\n  } else if (received_at) {\n    const d = new Date(stripHeaderPrefix(received_at));\n    received_at = isNaN(d) ? new Date().toISOString() : d.toISOString();\n  } else if (msg.internalDate) {\n    received_at = new Date(Number(msg.internalDate)).toISOString();\n  } else {\n    received_at = new Date().toISOString();\n  }\n\n  let message_id = msg.messageId || headersMap['message-id'] || headersMap['messageid'] || null;\n  if (message_id) message_id = stripHeaderPrefix(message_id);\n\n  let body_full = '';\n  let body_full_plain = '';\n  let body_full_html = '';\n\n  if (msg.text || msg.html || msg.textAsHtml) {\n    body_full_plain = (msg.text || '').trim();\n    if (!body_full_plain && msg.textAsHtml) {\n      body_full_plain = String(msg.textAsHtml)\n        .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')\n        .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')\n        .replace(/<[^>]+>/g, ' ')\n        .replace(/\\s+/g, ' ')\n        .trim();\n    }\n    body_full_html = (msg.html || msg.textAsHtml || '').trim();\n    body_full = body_full_plain || body_full_html\n      .replace(/<[^>]+>/g, ' ')\n      .replace(/\\s+/g, ' ')\n      .trim();\n  } else if (msg.payload) {\n    const b = getBodyFromPayload(msg.payload);\n    body_full = b.body_full; body_full_plain = b.body_full_plain; body_full_html = b.body_full_html;\n  }\n\n  const snippet = shortSnippet(body_full, 160);\n  const body_preview = (body_full || '').slice(0, 800);\n\n  const listUnsub  = headersMap['list-unsubscribe'] || '';\n  const listId     = headersMap['list-id'] || '';\n  const precedence = headersMap['precedence'] || '';\n  const auth       = headersMap['authentication-results'] || '';\n  const dmarcFail  = /dmarc=fail|spf=fail|dkim=fail/i.test(auth);\n  const isNoReply  = /no-?reply|do-?not-?reply/i.test(fromStr);\n  const hasBulk    = /bulk|list/i.test(precedence) || !!listId || !!listUnsub;\n  const hasUnsub   = !!listUnsub;\n\n  const rcptCount = [toStr, ccStr].filter(Boolean).join(',')\n    .split(',').map(s => s.trim()).filter(Boolean).length;\n\n  const fallbackKey = [subject, fromStr, received_at, snippet].join('|');\n  const dedup_key   = message_id || hash32(fallbackKey);\n\n  return {\n    gmail_id: gmail_id,\n    thread_id: thread_id,\n    message_id: message_id,\n    received_at: received_at,\n    from: fromStr,\n    to: toStr,\n    cc: ccStr,\n    subject: subject,\n    snippet: snippet,\n    body_preview: body_preview,\n    body_full: body_full,\n    header_flags: {\n      hasUnsub: hasUnsub,\n      hasListId: !!listId,\n      hasBulk: hasBulk,\n      isNoReply: isNoReply,\n      recipientCount: rcptCount,\n      dmarcFail: dmarcFail\n    },\n    dedup_key: dedup_key,\n    source_mailbox: 'central:gmail'\n  };\n}\n\n// ---- n8n Code node v2, For-Each-Item mode ----\nconst out = extractOne($json);\nreturn [{ json: out }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3680,
+        1024
+      ],
+      "id": "a6feb493-c945-4443-8436-28ad9e9ee3d2",
+      "name": "Extract Email Fields"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "gmail_id",
+              "value": "={{ $json.gmail_id }}",
+              "type": "string"
+            },
+            {
+              "name": "thread_id",
+              "value": "={{ $json.thread_id }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -3456,
+        1024
+      ],
+      "id": "dcdbe34c-d859-4cf0-8836-e2544eba2f77",
+      "name": "Set (IDs)"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1KW7cycfPX2HqcitpscXi3CKxhMzltaBedjippOgevQY",
+          "mode": "list",
+          "cachedResultName": "n8n",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1KW7cycfPX2HqcitpscXi3CKxhMzltaBedjippOgevQY/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 612826169,
+          "mode": "list",
+          "cachedResultName": "emails_index",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1KW7cycfPX2HqcitpscXi3CKxhMzltaBedjippOgevQY/edit#gid=612826169"
+        },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "dedup_key",
+              "lookupValue": "={{$node[\"Extract Email Fields\"].json[\"dedup_key\"]}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -3232,
+        1024
+      ],
+      "id": "1ddb6445-e7aa-4570-94ac-386f12cef872",
+      "name": "GS Get Row (by dedup_key)",
+      "alwaysOutputData": true,
+      "retryOnFail": true
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        -2560,
+        528
+      ],
+      "id": "89fc51af-0b65-47cc-8fdb-fbf354c7ce5d",
+      "name": "No-op (skip)"
+    },
+    {
+      "parameters": {
+        "jsCode": "// v1.8 — Unified LLM JSON extractor & normalizer for n8n Code node\n// Works with: OpenAI/ChatGPT choices[], Anthropic-style wrappers, AND Google Gemini (content.parts[0].text).\n// - Robust JSON extraction (fenced/inline, array/object, wrappers, Gemini parts)\n// - Deep-merge with full defaults (keeps unknown keys intact)\n// - Enforces mandatory keys and sane defaults\n// - Normalizes label_probs + confidence; aligns primary_label with argmax\n// - Guards secondary_labels rules (\"Pending\" only with Priority, else [\"null\"])\n// - Coerces booleans/numbers; dedupes URLs/entities; domain-izes urls\n// - Trims key_points/suggested_actions bullets to ≤12 words and ≤3 items\n// - Leaves any extra keys from model intact\n\n// ===== 1) Helpers to find the model's JSON payload across common shapes =====\n\n// Try to pull a raw text/object regardless of vendor\nfunction pickRawTopLevel(j) {\n  if (!j) return j;\n\n  // 1) Gemini shapes\n  //   a) { content: { parts: [{ text }] } }\n  if (j?.content?.parts?.[0]?.text !== undefined) return j.content.parts[0].text;\n  //   b) [{ content: { parts: [{ text }] }, ... }]\n  if (Array.isArray(j) && j[0]?.content?.parts?.[0]?.text !== undefined) return j[0].content.parts[0].text;\n\n  // 2) OpenAI-ish\n  if (j?.message?.content !== undefined) return j.message.content;\n  if (j?.response?.message?.content !== undefined) return j.response.message.content;\n  if (j?.parsed !== undefined) return j.parsed;\n  if (j?.data?.choices?.[0]?.message?.parsed !== undefined) return j.data.choices[0].message.parsed;\n  if (j?.data?.choices?.[0]?.message?.content !== undefined) return j.data.choices[0].message.content;\n\n  // 3) Anthropic-ish\n  if (j?.content !== undefined && typeof j.content === 'string') return j.content;\n\n  // 4) Fallbacks\n  if (typeof j === 'string') return j;\n  return j; // maybe already an object\n}\n\nfunction stripCodeFences(s) {\n  const str = String(s).trim();\n  // Remove a single ```json ... ``` or ``` ... ``` block if present\n  const m = str.match(/```(?:json)?\\s*([\\s\\S]*?)```/i);\n  return m ? m[1].trim() : str;\n}\n\nfunction extractJsonFromString(s) {\n  const t = stripCodeFences(s);\n  try { return JSON.parse(t); } catch (_) {}\n\n  // Fallbacks: try array then object slice\n  const fb = t.indexOf('['), lb = t.lastIndexOf(']');\n  if (fb !== -1 && lb > fb) { try { return JSON.parse(t.slice(fb, lb + 1)); } catch (_) {} }\n  const f = t.indexOf('{'), l = t.lastIndexOf('}');\n  if (f !== -1 && l > f) { return JSON.parse(t.slice(f, l + 1)); }\n\n  throw new Error('No JSON found in LLM output');\n}\n\n// ===== 2) Pull & parse per incoming item =====\n\nlet raw = pickRawTopLevel($json);\n\nlet parsed;\nif (typeof raw === 'string') {\n  try { parsed = extractJsonFromString(raw); }\n  catch (e) { parsed = { __parse_error: String(e), __raw: raw }; }\n} else if (raw && typeof raw === 'object') {\n  parsed = raw;\n} else {\n  parsed = { __parse_error: 'Unexpected LLM output type', __raw_type: typeof raw };\n}\n\n// Unwrap common wrappers\nif (parsed && parsed.message && typeof parsed.message.content === 'object') {\n  parsed = parsed.message.content;\n}\n// If model wrapped in an array, take the first (classifier emits one item)\nif (Array.isArray(parsed)) parsed = parsed[0] ?? {};\n\n// ===== 3) Defaults (ALL mandatory keys) =====\nconst CLASSES = ['Priority','Personal Finance','Admin','Newsletter','SPAM'];\n\nconst defaults = {\n  primary_label: null,\n  secondary_labels: [\"null\"],\n\n  importance_score: 0,\n  is_important: false,\n  confidence: 0,\n  label_probs: { Priority: 0, \"Personal Finance\": 0, Admin: 0, Newsletter: 0, SPAM: 0 },\n  second_best_label: null,\n  second_best_reason: \"\",\n\n  key_points: [],\n  explanation: \"\",\n\n  deadline_utc: null,\n  reply_deadline_hint_utc: null,\n\n  suggested_actions: [],\n  action_required: false,\n  action_type: null, // reply|schedule|pay|read|file|null\n\n  entities: { people: [], companies: [], money: [] },\n  ids_extracted: { invoice_numbers: [], order_numbers: [], tracking_numbers: [] },\n  phones_emails: { phones: [], emails: [] },\n  language: null,\n\n  thread_hint: \"\",\n  urls: [],\n\n  needs_web_search: false,\n  used_web_search: false,\n  search_needed_reason: \"\",\n  search_queries: [],\n  domain_to_check: null,\n  web_result_urls: [],\n  web_search_summary: \"\",\n\n  phishing_risk_score: 0,\n  phishing_signals: [],\n  header_interpretation: \"\",\n\n  uncertainty_reasons: [],\n  evidence_spans: [ { field: \"subject\", quote: \"\" } ],\n\n  model_name: \"\",\n  prompt_version: \"\",\n  rules_to_refine: [],\n  minimal_prompt_patch: \"\",\n\n  confidence_before_search: 0,\n  confidence_after_search: 0,\n\n  decision_rules_triggered: [],\n  reply_draft_short: \"\"\n};\n\n// Deep-merge defaults with parsed without dropping unknown keys\nfunction deepMerge(def, obj) {\n  if (Array.isArray(def)) return Array.isArray(obj) ? obj : def.slice();\n  if (def && typeof def === 'object') {\n    const out = { ...def, ...(obj && typeof obj === 'object' ? obj : {}) };\n    for (const k of Object.keys(def)) {\n      const dv = def[k], ov = obj?.[k];\n      if (dv && typeof dv === 'object' && !Array.isArray(dv)) {\n        out[k] = deepMerge(dv, ov);\n      }\n    }\n    return out;\n  }\n  return (obj === undefined) ? def : obj;\n}\n\nlet out = deepMerge(defaults, parsed);\n\n// ===== 4) Light normalizations & coercions =====\nconst toArr = v => Array.isArray(v) ? v : (v == null ? [] : [String(v)]);\nconst toBool = v => (typeof v === 'string' ? v.toLowerCase() === 'true' : !!v);\nconst toNum = v => {\n  const n = Number(v);\n  return Number.isFinite(n) ? n : 0;\n};\nconst clamp = (n,min,max)=> Math.min(max, Math.max(min, n));\n\nout.secondary_labels = Array.isArray(out.secondary_labels)\n  ? out.secondary_labels\n  : (out.secondary_labels ? [String(out.secondary_labels)] : [\"null\"]);\n\nout.key_points = toArr(out.key_points);\nout.suggested_actions = toArr(out.suggested_actions);\nout.search_queries = toArr(out.search_queries);\n\n// Coerce booleans\n['is_important','needs_web_search','used_web_search','action_required'].forEach(\n  k => out[k] = toBool(out[k])\n);\n\n// Coerce numbers & clamp\nout.importance_score = clamp(toNum(out.importance_score), 0, 100);\nout.phishing_risk_score = clamp(toNum(out.phishing_risk_score), 0, 100);\nout.confidence_before_search = toNum(out.confidence_before_search);\nout.confidence_after_search = toNum(out.confidence_after_search);\n\n// Ensure nested objects exist\nif (!out.entities || typeof out.entities !== 'object') out.entities = { people: [], companies: [], money: [] };\nif (!Array.isArray(out.entities.people)) out.entities.people = [];\nif (!Array.isArray(out.entities.companies)) out.entities.companies = [];\nif (!Array.isArray(out.entities.money)) out.entities.money = [];\n\nif (!out.ids_extracted || typeof out.ids_extracted !== 'object') out.ids_extracted = { invoice_numbers: [], order_numbers: [], tracking_numbers: [] };\n['invoice_numbers','order_numbers','tracking_numbers'].forEach(k => {\n  if (!Array.isArray(out.ids_extracted[k])) out.ids_extracted[k] = [];\n});\n\nif (!out.phones_emails || typeof out.phones_emails !== 'object') out.phones_emails = { phones: [], emails: [] };\nif (!Array.isArray(out.phones_emails.phones)) out.phones_emails.phones = [];\nif (!Array.isArray(out.phones_emails.emails)) out.phones_emails.emails = [];\n\n// ===== 5) URL hygiene =====\nfunction domainOf(u) {\n  try {\n    const url = new URL(String(u));\n    return url.hostname.toLowerCase();\n  } catch {\n    const s = String(u).trim().toLowerCase();\n    return s.replace(/^https?:\\/\\//, '').split(/[\\/?#]/)[0];\n  }\n}\nconst dedup = arr => [...new Set((arr || []).filter(Boolean))];\n\nout.urls = dedup((out.urls || []).map(x => domainOf(x)));\nout.web_result_urls = dedup((out.web_result_urls || []).map(String));\n\n// ===== 6) Entities dedupe =====\nconst uniqStr = a => [...new Set((a || []).map(String))];\nout.entities.people = uniqStr(out.entities.people);\nout.entities.companies = uniqStr(out.entities.companies);\n// money: keep as-is\n\n// ===== 7) Evidence spans structure =====\nif (!Array.isArray(out.evidence_spans)) out.evidence_spans = [];\nout.evidence_spans = out.evidence_spans\n  .filter(e => e && typeof e === 'object' && 'field' in e && 'quote' in e)\n  .slice(0, 3);\nif (out.evidence_spans.length === 0) {\n  out.evidence_spans = [ { field: \"subject\", quote: \"\" } ];\n}\n\n// ===== 8) Secondary labels guard =====\nif (out.primary_label === 'Priority' && out.secondary_labels.includes('Pending')) {\n  out.secondary_labels = ['Pending'];\n} else {\n  out.secondary_labels = ['null'];\n}\n\n// ===== 9) Label probabilities & confidence =====\nif (!out.label_probs || typeof out.label_probs !== 'object') {\n  out.label_probs = { Priority: 0, \"Personal Finance\": 0, Admin: 0, Newsletter: 0, SPAM: 0 };\n}\nfor (const k of CLASSES) out.label_probs[k] = clamp(toNum(out.label_probs[k]), 0, 1);\n\nlet sum = CLASSES.reduce((a,k)=> a + (out.label_probs[k] || 0), 0);\n\nif (sum === 0) {\n  // If all-zero probs, honor primary_label if valid; else uniform prior\n  if (CLASSES.includes(out.primary_label)) {\n    out.label_probs = Object.fromEntries(CLASSES.map(c => [c, c === out.primary_label ? 1 : 0]));\n    out.confidence = 1;\n  } else {\n    const u = 1 / CLASSES.length;\n    out.label_probs = Object.fromEntries(CASSES.map(c => [c, u]));\n    out.confidence = u;\n  }\n} else {\n  // Normalize to sum=1\n  for (const k of CLASSES) out.label_probs[k] = (out.label_probs[k] || 0) / sum;\n  out.confidence = Math.max(...CLASSES.map(k => out.label_probs[k]));\n}\n\n// Align primary_label if invalid/missing and probs are informative\nif (!CLASSES.includes(out.primary_label)) {\n  let best = null, bestP = -1;\n  for (const k of CLASSES) {\n    if ((out.label_probs[k] || 0) > bestP) { bestP = out.label_probs[k]; best = k; }\n  }\n  if (bestP > 0) out.primary_label = best;\n}\n\n// ===== 10) Bullet hygiene: ≤3 bullets, ≤12 words each =====\nfunction trimTo12Words(s) {\n  if (typeof s !== 'string') return '';\n  const words = s.trim().split(/\\s+/);\n  return words.slice(0, 12).join(' ');\n}\nif (Array.isArray(out.key_points)) {\n  out.key_points = out.key_points.slice(0, 3).map(trimTo12Words);\n}\nif (Array.isArray(out.suggested_actions)) {\n  out.suggested_actions = out.suggested_actions.slice(0, 3).map(trimTo12Words);\n}\n\n// Optional: enforce action_type set\nconst ACTIONS = ['reply','schedule','pay','read','file',null];\nif (!ACTIONS.includes(out.action_type)) out.action_type = out.action_type == null ? null : String(out.action_type);\n\n// ===== 11) Return single normalized object =====\nreturn [{ json: out }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2208,
+        1120
+      ],
+      "id": "5fd9e530-2102-4f2f-a877-21e185561483",
+      "name": "Parse LLM JSON"
+    },
+    {
+      "parameters": {
+        "query": "={{ Array.isArray($json.search_queries) ? $json.search_queries.slice(0,3).join(' OR ') : ($json.search_queries || '') }}",
+        "count": 5
+      },
+      "type": "@brave/n8n-nodes-brave-search.braveSearch",
+      "typeVersion": 1,
+      "position": [
+        -1760,
+        976
+      ],
+      "id": "854ad3b9-453a-4583-881d-ffce38e06430",
+      "name": "Brave Search"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $items().map(i => i.json); const top = items.slice(0,5).map(r => ({title:r.title,url:r.url,snippet:r.description||r.snippet||''})); return [{ json: { web_results: top } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1536,
+        976
+      ],
+      "id": "e330b395-ef9d-433f-8bae-10191f372a98",
+      "name": "Summarize Results"
+    },
+    {
+      "parameters": {
+        "jsCode": "// v1.8 — Unified LLM JSON extractor & normalizer for n8n Code node\n// Works with: OpenAI/ChatGPT choices[], Anthropic-style wrappers, AND Google Gemini (content.parts[0].text).\n// - Robust JSON extraction (fenced/inline, array/object, wrappers, Gemini parts)\n// - Deep-merge with full defaults (keeps unknown keys intact)\n// - Enforces mandatory keys and sane defaults\n// - Normalizes label_probs + confidence; aligns primary_label with argmax\n// - Guards secondary_labels rules (\"Pending\" only with Priority, else [\"null\"])\n// - Coerces booleans/numbers; dedupes URLs/entities; domain-izes urls\n// - Trims key_points/suggested_actions bullets to ≤12 words and ≤3 items\n// - Leaves any extra keys from model intact\n\n// ===== 1) Helpers to find the model's JSON payload across common shapes =====\n\n// Try to pull a raw text/object regardless of vendor\nfunction pickRawTopLevel(j) {\n  if (!j) return j;\n\n  // 1) Gemini shapes\n  //   a) { content: { parts: [{ text }] } }\n  if (j?.content?.parts?.[0]?.text !== undefined) return j.content.parts[0].text;\n  //   b) [{ content: { parts: [{ text }] }, ... }]\n  if (Array.isArray(j) && j[0]?.content?.parts?.[0]?.text !== undefined) return j[0].content.parts[0].text;\n\n  // 2) OpenAI-ish\n  if (j?.message?.content !== undefined) return j.message.content;\n  if (j?.response?.message?.content !== undefined) return j.response.message.content;\n  if (j?.parsed !== undefined) return j.parsed;\n  if (j?.data?.choices?.[0]?.message?.parsed !== undefined) return j.data.choices[0].message.parsed;\n  if (j?.data?.choices?.[0]?.message?.content !== undefined) return j.data.choices[0].message.content;\n\n  // 3) Anthropic-ish\n  if (j?.content !== undefined && typeof j.content === 'string') return j.content;\n\n  // 4) Fallbacks\n  if (typeof j === 'string') return j;\n  return j; // maybe already an object\n}\n\nfunction stripCodeFences(s) {\n  const str = String(s).trim();\n  // Remove a single ```json ... ``` or ``` ... ``` block if present\n  const m = str.match(/```(?:json)?\\s*([\\s\\S]*?)```/i);\n  return m ? m[1].trim() : str;\n}\n\nfunction extractJsonFromString(s) {\n  const t = stripCodeFences(s);\n  try { return JSON.parse(t); } catch (_) {}\n\n  // Fallbacks: try array then object slice\n  const fb = t.indexOf('['), lb = t.lastIndexOf(']');\n  if (fb !== -1 && lb > fb) { try { return JSON.parse(t.slice(fb, lb + 1)); } catch (_) {} }\n  const f = t.indexOf('{'), l = t.lastIndexOf('}');\n  if (f !== -1 && l > f) { return JSON.parse(t.slice(f, l + 1)); }\n\n  throw new Error('No JSON found in LLM output');\n}\n\n// ===== 2) Pull & parse per incoming item =====\n\nlet raw = pickRawTopLevel($json);\n\nlet parsed;\nif (typeof raw === 'string') {\n  try { parsed = extractJsonFromString(raw); }\n  catch (e) { parsed = { __parse_error: String(e), __raw: raw }; }\n} else if (raw && typeof raw === 'object') {\n  parsed = raw;\n} else {\n  parsed = { __parse_error: 'Unexpected LLM output type', __raw_type: typeof raw };\n}\n\n// Unwrap common wrappers\nif (parsed && parsed.message && typeof parsed.message.content === 'object') {\n  parsed = parsed.message.content;\n}\n// If model wrapped in an array, take the first (classifier emits one item)\nif (Array.isArray(parsed)) parsed = parsed[0] ?? {};\n\n// ===== 3) Defaults (ALL mandatory keys) =====\nconst CLASSES = ['Priority','Personal Finance','Admin','Newsletter','SPAM'];\n\nconst defaults = {\n  primary_label: null,\n  secondary_labels: [\"null\"],\n\n  importance_score: 0,\n  is_important: false,\n  confidence: 0,\n  label_probs: { Priority: 0, \"Personal Finance\": 0, Admin: 0, Newsletter: 0, SPAM: 0 },\n  second_best_label: null,\n  second_best_reason: \"\",\n\n  key_points: [],\n  explanation: \"\",\n\n  deadline_utc: null,\n  reply_deadline_hint_utc: null,\n\n  suggested_actions: [],\n  action_required: false,\n  action_type: null, // reply|schedule|pay|read|file|null\n\n  entities: { people: [], companies: [], money: [] },\n  ids_extracted: { invoice_numbers: [], order_numbers: [], tracking_numbers: [] },\n  phones_emails: { phones: [], emails: [] },\n  language: null,\n\n  thread_hint: \"\",\n  urls: [],\n\n  needs_web_search: false,\n  used_web_search: false,\n  search_needed_reason: \"\",\n  search_queries: [],\n  domain_to_check: null,\n  web_result_urls: [],\n  web_search_summary: \"\",\n\n  phishing_risk_score: 0,\n  phishing_signals: [],\n  header_interpretation: \"\",\n\n  uncertainty_reasons: [],\n  evidence_spans: [ { field: \"subject\", quote: \"\" } ],\n\n  model_name: \"\",\n  prompt_version: \"\",\n  rules_to_refine: [],\n  minimal_prompt_patch: \"\",\n\n  confidence_before_search: 0,\n  confidence_after_search: 0,\n\n  decision_rules_triggered: [],\n  reply_draft_short: \"\"\n};\n\n// Deep-merge defaults with parsed without dropping unknown keys\nfunction deepMerge(def, obj) {\n  if (Array.isArray(def)) return Array.isArray(obj) ? obj : def.slice();\n  if (def && typeof def === 'object') {\n    const out = { ...def, ...(obj && typeof obj === 'object' ? obj : {}) };\n    for (const k of Object.keys(def)) {\n      const dv = def[k], ov = obj?.[k];\n      if (dv && typeof dv === 'object' && !Array.isArray(dv)) {\n        out[k] = deepMerge(dv, ov);\n      }\n    }\n    return out;\n  }\n  return (obj === undefined) ? def : obj;\n}\n\nlet out = deepMerge(defaults, parsed);\n\n// ===== 4) Light normalizations & coercions =====\nconst toArr = v => Array.isArray(v) ? v : (v == null ? [] : [String(v)]);\nconst toBool = v => (typeof v === 'string' ? v.toLowerCase() === 'true' : !!v);\nconst toNum = v => {\n  const n = Number(v);\n  return Number.isFinite(n) ? n : 0;\n};\nconst clamp = (n,min,max)=> Math.min(max, Math.max(min, n));\n\nout.secondary_labels = Array.isArray(out.secondary_labels)\n  ? out.secondary_labels\n  : (out.secondary_labels ? [String(out.secondary_labels)] : [\"null\"]);\n\nout.key_points = toArr(out.key_points);\nout.suggested_actions = toArr(out.suggested_actions);\nout.search_queries = toArr(out.search_queries);\n\n// Coerce booleans\n['is_important','needs_web_search','used_web_search','action_required'].forEach(\n  k => out[k] = toBool(out[k])\n);\n\n// Coerce numbers & clamp\nout.importance_score = clamp(toNum(out.importance_score), 0, 100);\nout.phishing_risk_score = clamp(toNum(out.phishing_risk_score), 0, 100);\nout.confidence_before_search = toNum(out.confidence_before_search);\nout.confidence_after_search = toNum(out.confidence_after_search);\n\n// Ensure nested objects exist\nif (!out.entities || typeof out.entities !== 'object') out.entities = { people: [], companies: [], money: [] };\nif (!Array.isArray(out.entities.people)) out.entities.people = [];\nif (!Array.isArray(out.entities.companies)) out.entities.companies = [];\nif (!Array.isArray(out.entities.money)) out.entities.money = [];\n\nif (!out.ids_extracted || typeof out.ids_extracted !== 'object') out.ids_extracted = { invoice_numbers: [], order_numbers: [], tracking_numbers: [] };\n['invoice_numbers','order_numbers','tracking_numbers'].forEach(k => {\n  if (!Array.isArray(out.ids_extracted[k])) out.ids_extracted[k] = [];\n});\n\nif (!out.phones_emails || typeof out.phones_emails !== 'object') out.phones_emails = { phones: [], emails: [] };\nif (!Array.isArray(out.phones_emails.phones)) out.phones_emails.phones = [];\nif (!Array.isArray(out.phones_emails.emails)) out.phones_emails.emails = [];\n\n// ===== 5) URL hygiene =====\nfunction domainOf(u) {\n  try {\n    const url = new URL(String(u));\n    return url.hostname.toLowerCase();\n  } catch {\n    const s = String(u).trim().toLowerCase();\n    return s.replace(/^https?:\\/\\//, '').split(/[\\/?#]/)[0];\n  }\n}\nconst dedup = arr => [...new Set((arr || []).filter(Boolean))];\n\nout.urls = dedup((out.urls || []).map(x => domainOf(x)));\nout.web_result_urls = dedup((out.web_result_urls || []).map(String));\n\n// ===== 6) Entities dedupe =====\nconst uniqStr = a => [...new Set((a || []).map(String))];\nout.entities.people = uniqStr(out.entities.people);\nout.entities.companies = uniqStr(out.entities.companies);\n// money: keep as-is\n\n// ===== 7) Evidence spans structure =====\nif (!Array.isArray(out.evidence_spans)) out.evidence_spans = [];\nout.evidence_spans = out.evidence_spans\n  .filter(e => e && typeof e === 'object' && 'field' in e && 'quote' in e)\n  .slice(0, 3);\nif (out.evidence_spans.length === 0) {\n  out.evidence_spans = [ { field: \"subject\", quote: \"\" } ];\n}\n\n// ===== 8) Secondary labels guard =====\nif (out.primary_label === 'Priority' && out.secondary_labels.includes('Pending')) {\n  out.secondary_labels = ['Pending'];\n} else {\n  out.secondary_labels = ['null'];\n}\n\n// ===== 9) Label probabilities & confidence =====\nif (!out.label_probs || typeof out.label_probs !== 'object') {\n  out.label_probs = { Priority: 0, \"Personal Finance\": 0, Admin: 0, Newsletter: 0, SPAM: 0 };\n}\nfor (const k of CLASSES) out.label_probs[k] = clamp(toNum(out.label_probs[k]), 0, 1);\n\nlet sum = CLASSES.reduce((a,k)=> a + (out.label_probs[k] || 0), 0);\n\nif (sum === 0) {\n  // If all-zero probs, honor primary_label if valid; else uniform prior\n  if (CLASSES.includes(out.primary_label)) {\n    out.label_probs = Object.fromEntries(CLASSES.map(c => [c, c === out.primary_label ? 1 : 0]));\n    out.confidence = 1;\n  } else {\n    const u = 1 / CLASSES.length;\n    out.label_probs = Object.fromEntries(CASSES.map(c => [c, u]));\n    out.confidence = u;\n  }\n} else {\n  // Normalize to sum=1\n  for (const k of CLASSES) out.label_probs[k] = (out.label_probs[k] || 0) / sum;\n  out.confidence = Math.max(...CLASSES.map(k => out.label_probs[k]));\n}\n\n// Align primary_label if invalid/missing and probs are informative\nif (!CLASSES.includes(out.primary_label)) {\n  let best = null, bestP = -1;\n  for (const k of CLASSES) {\n    if ((out.label_probs[k] || 0) > bestP) { bestP = out.label_probs[k]; best = k; }\n  }\n  if (bestP > 0) out.primary_label = best;\n}\n\n// ===== 10) Bullet hygiene: ≤3 bullets, ≤12 words each =====\nfunction trimTo12Words(s) {\n  if (typeof s !== 'string') return '';\n  const words = s.trim().split(/\\s+/);\n  return words.slice(0, 12).join(' ');\n}\nif (Array.isArray(out.key_points)) {\n  out.key_points = out.key_points.slice(0, 3).map(trimTo12Words);\n}\nif (Array.isArray(out.suggested_actions)) {\n  out.suggested_actions = out.suggested_actions.slice(0, 3).map(trimTo12Words);\n}\n\n// Optional: enforce action_type set\nconst ACTIONS = ['reply','schedule','pay','read','file',null];\nif (!ACTIONS.includes(out.action_type)) out.action_type = out.action_type == null ? null : String(out.action_type);\n\n// ===== 11) Return single normalized object =====\nreturn [{ json: out }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -960,
+        976
+      ],
+      "id": "3243da54-9802-4181-b605-e8117eaba7eb",
+      "name": "Parse Final JSON"
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $node[\"Extract Email Fields\"].json[\"gmail_id\"] }}",
+        "labelIds": [
+          "SPAM"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        -512,
+        1216
+      ],
+      "id": "a57bdf56-8170-4e57-bbb7-3f303513b409",
+      "name": "Apply SPAM",
+      "webhookId": "1a205ad9-5f2a-49ab-8565-2437123ce058"
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $node[\"Extract Email Fields\"].json[\"gmail_id\"] }}",
+        "labelIds": [
+          "Label_7270558665040116563",
+          "INBOX",
+          "IMPORTANT"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        -288,
+        1792
+      ],
+      "id": "adb1fb44-5ab6-4291-ad58-0911eb0c1d07",
+      "name": "Priority + Pending",
+      "webhookId": "b395446a-b744-4147-b82e-9a7da84cc9b4",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $node[\"Extract Email Fields\"].json[\"gmail_id\"] }}",
+        "labelIds": [
+          "Label_5923196818872817295",
+          "INBOX",
+          "IMPORTANT"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        -288,
+        1600
+      ],
+      "id": "7e5c7001-d072-41ee-b3e7-532e4cca128c",
+      "name": "Priority",
+      "webhookId": "f0982954-43b3-4425-9d0c-1bb6e3f1aaaf",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $node[\"Extract Email Fields\"].json[\"gmail_id\"] }}",
+        "labelIds": [
+          "Label_468811861220842471",
+          "INBOX",
+          "IMPORTANT"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        -288,
+        1984
+      ],
+      "id": "0dfdfd82-a4db-4a70-bb5e-79e1cb8bf8b9",
+      "name": "Admin",
+      "webhookId": "e911093b-bb0d-4541-8660-bb2079b35f97",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $node[\"Extract Email Fields\"].json[\"gmail_id\"] }}",
+        "labelIds": [
+          "Label_6109609968514027906"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        -288,
+        2176
+      ],
+      "id": "e3c0e85a-ea7a-45b9-b2b3-64465d8c218b",
+      "name": "Newsletter",
+      "webhookId": "85ab401c-a23e-45b0-b7aa-0e606434bce8",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $node[\"Extract Email Fields\"].json[\"gmail_id\"] }}",
+        "labelIds": [
+          "Label_5808454517259715638",
+          "IMPORTANT",
+          "INBOX"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        -288,
+        2368
+      ],
+      "id": "9cdf6467-c719-4987-9544-86ead94f09b1",
+      "name": "Finance",
+      "webhookId": "6bf433f8-0fc4-44c4-843f-79909e704aec",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "removeLabels",
+        "messageId": "={{ $node[\"Extract Email Fields\"].json[\"gmail_id\"] }}",
+        "labelIds": [
+          "CATEGORY_FORUMS",
+          "CATEGORY_PERSONAL",
+          "CATEGORY_PROMOTIONS",
+          "CATEGORY_SOCIAL",
+          "CATEGORY_UPDATES",
+          "INBOX",
+          "IMPORTANT",
+          "Label_468811861220842471",
+          "Label_1049394865226329657",
+          "Label_5808454517259715638",
+          "Label_5923196818872817295",
+          "Label_7270558665040116563"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        160,
+        2176
+      ],
+      "id": "958e39d8-30a5-4350-b79e-6eb41acaaaa9",
+      "name": "Remove label from message",
+      "webhookId": "850cb1ab-dc9a-4ea0-a45f-2d66bd480c0c",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Build push text with subject, sender, snippet, and Gmail link.\n * Mode: Run Once for Each Item\n */\n\nfunction get(obj, path, dflt = undefined) {\n  return path.split('.').reduce((o, k) => (o && o[k] !== undefined ? o[k] : undefined), obj) ?? dflt;\n}\n\nfunction extractMessageId(j) {\n  let mid =\n    j.message_id ||\n    get(j, 'headers.Message-ID') ||\n    (Array.isArray(get(j, 'payload.headers'))\n      ? get(j, 'payload.headers').find(h => (h.name || '').toLowerCase() === 'message-id')?.value\n      : undefined);\n\n  if (!mid) return '';\n  mid = String(mid).trim();\n  if (mid.startsWith('<') && mid.endsWith('>')) mid = mid.slice(1, -1).trim();\n  return mid;\n}\n\nconst j = $json;\nconst mid = extractMessageId(j);\nconst threadId = j.threadId ?? j.thread_id ?? get(j, 'metadata.threadId');\n\nconst gmailLink = mid\n  ? `https://mail.google.com/mail/u/0/#search/rfc822msgid:${encodeURIComponent(mid)}`\n  : (threadId\n      ? `https://mail.google.com/mail/u/0/#inbox/${encodeURIComponent(threadId)}`\n      : `https://mail.google.com/mail/u/0/#inbox`);\n\nconst subject = (j.subject ?? '').toString().slice(0, 200);\nconst from = (j.from ?? j.sender ?? '').toString();\n\n// Prefer Gmail API snippet if available, else take body preview\nlet snippet = (j.snippet ?? '').toString().trim();\nif (!snippet && j.body) {\n  snippet = String(j.body).replace(/\\s+/g, ' ').slice(0, 200);\n}\nif (snippet.length > 200) snippet = snippet.slice(0, 197) + '...';\n\nconst push_text = `📧 ${subject}\\nFrom: ${from}\\n${snippet}\\nOpen: ${gmailLink}`;\n\nreturn [\n  {\n    json: {\n      gmail_link: gmailLink,\n      push_text,\n      subject,\n      from,\n      snippet,\n      message_id: mid || null,\n      thread_id: threadId || null,\n    },\n  },\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -64,
+        1408
+      ],
+      "id": "596d322f-5cbc-4d92-a037-785251c40198",
+      "name": "Build Push Text"
+    },
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "includeSpamTrash": true
+        },
+        "options": {}
+      },
+      "id": "5246e13f-0005-4e72-b1f0-8d67ad357c70",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -4128,
+        1024
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.primary_label !== 'SPAM' && Number($json.importance_score ?? 0) >= 90 }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "rightValue": "",
+              "id": "3100238c-3674-42eb-904b-f00b39cbf6d6"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -288,
+        1408
+      ],
+      "id": "c118b55c-f167-414c-87f1-430c847cd77d",
+      "name": "Urgent?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{!!$json.needs_web_search}}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "id": "8aaba763-89e7-4df9-9fa7-e35086a6862a"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -1984,
+        1120
+      ],
+      "id": "d97f2eac-9fa9-45c9-b398-96fda7d66139",
+      "name": "Web Search?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json[\"primary_label\"] }}",
+              "rightValue": "SPAM",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              },
+              "id": "91207d68-35be-405e-b72d-67bd9003df65"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -736,
+        1312
+      ],
+      "id": "9a845a5b-7d1e-45d4-965e-0e4562644cd2",
+      "name": "Spam?"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-5-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-5-MINI"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "You are an email triage assistant for Harry.\n\nOUTPUT MODE\n• Return STRICT JSON only as ONE minified object (no newlines/prose/markdown).\n• Include EVERY key from the schema; if N/A use null/\"\"/[]/{} exactly.\n• Never invent URLs, IDs, phone numbers, money amounts, or dates not in the email (or obviously inferable like end-of-day for a date).\n• Apply gates and tie-breakers exactly. Ensure valid JSON (no trailing commas).\n\n------------------------------------\nA) OUTPUT SCHEMA (MUST include all keys exactly as named)\n{\n  \"primary_label\":\"Priority|Personal Finance|Admin|Newsletter|SPAM\",\n  \"secondary_labels\":[\"Pending|null\"],\n  \"importance_score\":0,\n  \"is_important\":false,\n  \"confidence\":0.0,\n  \"label_probs\":{\"Priority\":0.0,\"Personal Finance\":0.0,\"Admin\":0.0,\"Newsletter\":0.0,\"SPAM\":0.0},\n  \"second_best_label\":null,\n  \"second_best_reason\":\"\",\n  \"key_points\":[\"...\"],\n  \"explanation\":\"\",\n  \"deadline_utc\":\"YYYY-MM-DDTHH:mm:ssZ|null\",\n  \"reply_deadline_hint_utc\":\"YYYY-MM-DDTHH:mm:ssZ|null\",\n  \"suggested_actions\":[\"...\"],\n  \"action_required\":false,\n  \"action_type\":\"reply|schedule|pay|read|file|null\",\n  \"entities\":{\"people\":[],\"companies\":[],\"money\":[{\"amount\":0,\"currency\":\"USD\"}]},\n  \"ids_extracted\":{\"invoice_numbers\":[],\"order_numbers\":[],\"tracking_numbers\":[]},\n  \"phones_emails\":{\"phones\":[],\"emails\":[]},\n  \"language\":\"en|null\",\n  \"thread_hint\":\"\",\n  \"urls\":[],\n  \"needs_web_search\":false,\n  \"used_web_search\":false,\n  \"search_needed_reason\":\"\",\n  \"search_queries\":[],\n  \"domain_to_check\":null,\n  \"web_result_urls\":[],\n  \"web_search_summary\":\"\",\n  \"phishing_risk_score\":0,\n  \"phishing_signals\":[],\n  \"header_interpretation\":\"\",\n  \"uncertainty_reasons\":[],\n  \"evidence_spans\":[{\"field\":\"subject|body|from\",\"quote\":\"\"}],\n  \"model_name\":\"<SET_BY_CALLER>\",\n  \"prompt_version\":\"v2.0\",\n  \"rules_to_refine\":[],\n  \"minimal_prompt_patch\":\"\",\n  \"confidence_before_search\":0.0,\n  \"confidence_after_search\":0.0,\n  \"decision_rules_triggered\":[],\n  \"reply_draft_short\":\"\"\n}\n\n------------------------------------\nB) LABEL DEFINITIONS (choose EXACTLY ONE)\n\nPriority\n• Person-like sender (individual/small team) directly asks to decide/approve/confirm/respond soon; action unblocks work.\n• Must pass Priority Gates (Section D G0).\n• Exclude: bulk marketing, transactional docs, automated system notices without a human ask.\n\nPersonal Finance\n• Transactional money about accounts/obligations: invoices, statements, receipts, posted/declined charges, balances, refunds, taxes, insurance, rent, utilities, payroll, bank transfers.\n• Evidence: explicit amounts/balances OR invoice/receipt/statement OR account/card suffix OR payment/transfer confirmation.\n• Exclude: promotional “spend to earn”/offers without posted charge/bill/balance (→ Newsletter).\n\nAdmin\n• Non-financial logistics/operations: security/identity events, OTPs, resets, account/config changes, sign-in alerts, shipping/returns/delivery, itineraries/tickets/bookings, appointments, government/IT notices, service advisories.\n• Use when core purpose is operational/security and not a transactional bill (PF) or a person-like ask (Priority).\n\nNewsletter\n• Bulk/opt-in messages to broad audiences: promos, product announcements, release notes, digests, educational/community updates (incl. bank/fintech promos without posted charges/bills/balances).\n• Strong bulk cues: unsubscribe/List-ID/tracking links/generic template/periodic cadence.\n\nSPAM\n• Unsolicited/deceptive/phishing/malware; spoofed brands; blasts without reasonable opt-in; credential harvesting/payload attempts. Prefer SPAM when multiple high-risk signals and no strong opt-in cues.\n\n------------------------------------\nC) SECONDARY LABELS\n• Only \"Pending\" is allowed.\n• Set \"Pending\" ONLY if primary_label=\"Priority\" AND the email explicitly indicates the other party owes a reply/follow-up.\n• Else exactly [\"null\"].\n\n------------------------------------\nD) HARD GATES & TIE-BREAKERS (first true wins; record names in decision_rules_triggered)\n\nG0_priority_gates (MUST be TRUE for Priority)\n• header_flags.hasBulk=false AND header_flags.hasListId=false AND header_flags.isNoReply=false.\n• If any fail → NOT Priority (evaluate other labels).\n\nTB0_phishing_override → SPAM\n• Multiple high-risk signals (e.g., auth failure + domain mismatch OR credential-harvest intent) and no strong opt-in cues.\n\nTB1_transactional_evidence → Personal Finance\n• Clear money evidence (any of): amount/balance due/posted/charged; invoice/receipt/statement; account/card suffix; payment/transfer confirmation.\n• Exception: pure promo thresholds with no posted charge/bill → TB4.\n\nTB2_security_ops → Admin\n• Authentication/security notices (passkeys, sign-in alerts, resets, OTPs), account/config changes, or system advisories from core service domains → Admin unless TB1 already applied.\n\nTB3_person_ask → Priority\n• Person-like direct request for decision/approval/confirmation/answer with timeframe AND G0 gates satisfied.\n• Exception: if verifiable transactional docs exist, prefer Personal Finance.\n\nTB4_financial_promos → Newsletter\n• Bank/fintech promotional content without posted charge/bill/balance due MUST be Newsletter.\n\nTB5_bulk_vs_unsolicited\n• Strong bulk/opt-in cues + reputable domain alignment → Newsletter.\n• Missing opt-in cues + risk signals → SPAM.\n\nTB6_travel_event\n• Explicit RSVP/decision ask → Priority (if G0 gates pass). Pure itinerary/ticket/logistics → Admin.\n\nTB7_header_consistency\n• Bulk headers + personal-sounding content → Newsletter unless TB0/TB1 apply.\n• Personal headers + bulk-sounding content → Admin/Priority as per TB2/TB3.\n\n------------------------------------\nE) SCORING & HYGIENE\n• importance_score 0–100: urgency/impact (urgent Priority, account compromise, large unexpected charge → higher; routine info → lower).\n• phishing_risk_score 0–100: minimal(0–19), mild(20–49), concerning(50–79), likely(80–100).\n• urls: canonical domains, lowercase, ≤3.\n• key_points: 1–3 bullets, ≤12 words each. suggested_actions: 1–3 short imperatives.\n• evidence_spans: ≤2 tiny quotes (≤80 chars) from the email only.\n• deadline_utc: if an offer/event end date exists, set to that date 23:59:59Z; if a specific time exists, use exactly; else null.\n• reply_deadline_hint_utc: set only if a “respond by” is explicit/implied.\n• language: ISO-639-1 or null.\n\n------------------------------------\nF) SELF-CONSISTENCY & LENGTH GUARD\n• Ensure label_probs sum ≈1.0 and primary_label = argmax(label_probs). If not, set primary_label to argmax and add \"consistency_fix\" to decision_rules_triggered.\n• Minify JSON (no pretty-print). Caps: explanation ≤180 chars; second_best_reason ≤120; header_interpretation ≤120; web_search_summary ≤220; thread_hint ≤40; minimal_prompt_patch ≤120; reply_draft_short ≤120.\n• If near limit: first reduce key_points/suggested_actions to 1 each; then blank second_best_reason/uncertainty_reasons/rules_to_refine/web_search_summary; never drop keys.\n\nNO WEB\n• Do not use external web. Set needs_web_search only if a later refiner should verify; then include 2–5 short queries (≤17 words) and confidence_before_search.\n",
+              "role": "system"
+            },
+            {
+              "content": "=Set \"model_name\" in your output exactly to: {{$json.runtime_model_name || 'gpt-5-nano'}}\n\nHeaders (JSON):\n{{ JSON.stringify($node[\"Extract Email Fields\"].json[\"header_flags\"]) }}\n\nEnvelope:\nFrom: {{$node[\"Extract Email Fields\"].json[\"from\"]}}\nTo: {{$node[\"Extract Email Fields\"].json[\"to\"]}}\nCc: {{$node[\"Extract Email Fields\"].json[\"cc\"]}}\nDate: {{$node[\"Extract Email Fields\"].json[\"received_at\"]}}\nSubject: {{$node[\"Extract Email Fields\"].json[\"subject\"]}}\n\nBody (full plain text):\n{{$node[\"Extract Email Fields\"].json[\"body_full\"]}}\n\nReturn ONLY the strict minified JSON per schema (one line, no markdown/prose).\n"
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": {
+          "frequency_penalty": 0,
+          "presence_penalty": 0,
+          "topP": 1
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [
+        -2560,
+        1216
+      ],
+      "id": "be22573b-56ef-42b1-8e86-4c547e7c5c2f",
+      "name": "Classify with OpenAI"
+    },
+    {
+      "parameters": {
+        "jsCode": "const found = $json && Object.keys($json).length>0 && !!$json.dedup_key; return { json: { found } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3008,
+        1024
+      ],
+      "id": "d4754f64-1e75-4e21-86d7-14398e39df1c",
+      "name": "Lookup → Found?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{!!$json.found}}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "id": "8eb8a22d-dad8-4413-b076-4197c1d06d5f"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -2784,
+        1024
+      ],
+      "id": "b9a0eff0-c51e-4687-b58f-20073d9804ee",
+      "name": "Already Processed?"
+    },
+    {
+      "parameters": {
+        "operation": "removeLabels",
+        "messageId": "={{ $node[\"Extract Email Fields\"].json[\"gmail_id\"] }}",
+        "labelIds": [
+          "CATEGORY_FORUMS",
+          "CATEGORY_PERSONAL",
+          "CATEGORY_PROMOTIONS",
+          "CATEGORY_SOCIAL",
+          "CATEGORY_UPDATES",
+          "IMPORTANT",
+          "INBOX",
+          "Label_468811861220842471",
+          "Label_6109609968514027906",
+          "Label_5808454517259715638",
+          "Label_5923196818872817295",
+          "Label_7270558665040116563"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        -288,
+        1216
+      ],
+      "id": "09756c3b-a9cc-4ee3-a5a5-72c1c1bbec7a",
+      "name": "Remove Label",
+      "webhookId": "8423905a-1bd5-4ca0-9513-538a55908ef9"
+    },
+    {
+      "parameters": {
+        "mode": "expression",
+        "numberOutputs": 6,
+        "output": "={{ \n  (idx => idx ?? 5)(\n    ({\n      'priority-pending': 0,   // Output 0 → Priority + Pending\n      'priority': 1,           // Output 1 → Priority\n      'admin': 2,              // Output 2 → Admin\n      'newsletter': 3,         // Output 3 → Newsletter\n      'personal finance': 4    // Output 4 → Finance\n    })[\n      (\n        ($json.primary_label || '').trim().toLowerCase() === 'priority' &&\n        Array.isArray($json.secondary_labels) &&\n        $json.secondary_labels.map(l => String(l).toLowerCase()).includes('pending')\n      )\n        ? 'priority-pending'\n        : ($json.primary_label || '').trim().toLowerCase()\n    ]\n  )\n}}"
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -512,
+        2016
+      ],
+      "id": "b779b2da-e441-49f8-9d31-b22a4d3cd883",
+      "name": "Switch"
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $node[\"Extract Email Fields\"].json[\"gmail_id\"] }}",
+        "labelIds": [
+          "Label_1049394865226329657"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        -288,
+        2560
+      ],
+      "id": "1e42c337-3b18-4868-bdc6-7c87c83b36ba",
+      "name": "Fallback Label",
+      "webhookId": "ea7be78f-8342-48ff-be7b-4df286e29e2d",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "userKey": "uq15cifshtr3kbhy3zdjz9xikz8dpt",
+        "message": "={{ $('Build Push Text').item.json.push_text }}",
+        "priority": 2,
+        "additionalFields": {
+          "title": "={{ $('Build Push Text').item.json.subject }}"
+        }
+      },
+      "type": "n8n-nodes-base.pushover",
+      "typeVersion": 1,
+      "position": [
+        384,
+        1408
+      ],
+      "id": "cd19a2da-a88d-4fb8-8b60-5ffbd93694fa",
+      "name": "Pushover (Urgent)"
+    },
+    {
+      "parameters": {
+        "operation": "removeLabels",
+        "messageId": "={{ $node[\"Extract Email Fields\"].json[\"gmail_id\"] }}",
+        "labelIds": [
+          "CATEGORY_FORUMS",
+          "CATEGORY_PERSONAL",
+          "CATEGORY_PROMOTIONS",
+          "CATEGORY_SOCIAL",
+          "CATEGORY_UPDATES",
+          "SPAM",
+          "Label_6109609968514027906",
+          "Label_1049394865226329657",
+          "Label_5808454517259715638",
+          "Label_468811861220842471"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        160,
+        1792
+      ],
+      "id": "c3475cc2-63ae-4732-9bd1-1b7e27c3fd70",
+      "name": "Remove label from important message",
+      "webhookId": "909ac281-9b92-4241-a717-235b8346834b",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "457a5e44-5c08-4edb-9332-4392cab0eff2",
+              "leftValue": "={{ $itemIndex === 0 }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -3904,
+        528
+      ],
+      "id": "37e2b644-69b0-4e14-871f-593bdd3c4774",
+      "name": "First Item?",
+      "executeOnce": false
+    },
+    {
+      "parameters": {
+        "url": "https://gmail.googleapis.com/gmail/v1/users/me/labels",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "gmailOAuth2",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -3680,
+        528
+      ],
+      "id": "f74e1b37-01f6-4260-a4c2-c0f812a0fd46",
+      "name": "List Labels"
+    },
+    {
+      "parameters": {
+        "jsCode": "const aliases = {\n  Priority:   ['Priority'],\n  Pending:    ['Pending','Priority/Pending'],\n  Admin:      ['Admin'],\n  Newsletter: ['Newsletter'],\n  Finance:    ['Finance','Personal Finance'],\n};\n\nconst all = $json.labels || [];\nconst have = new Set(all.map(l => String(l.name).toLowerCase()));\n\nconst missingCanon = Object.entries(aliases)\n  .filter(([canon, names]) => !names.some(n => have.has(n.toLowerCase())))\n  .map(([canon]) => canon);\n\n// one item per canonical name we truly need to create\nreturn [...new Set(missingCanon)].map(name => ({ json: { name } }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3456,
+        608
+      ],
+      "id": "6ad46b23-ca78-4e00-95a5-bb48859ec71d",
+      "name": "Labels: Missing"
+    },
+    {
+      "parameters": {
+        "resource": "label",
+        "operation": "create",
+        "name": "=={{ $json.name }}",
+        "options": {
+          "labelListVisibility": "labelShow",
+          "messageListVisibility": "show"
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        -3232,
+        608
+      ],
+      "id": "462d1829-3319-4de9-8f9d-0f665974ee20",
+      "name": "Create Label",
+      "webhookId": "45337010-1b47-4e40-8ab3-be05c18837ce",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "url": "https://gmail.googleapis.com/gmail/v1/users/me/labels",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "gmailOAuth2",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -3008,
+        528
+      ],
+      "id": "be97460a-9971-4ce1-993e-89b210875a14",
+      "name": "List Labels Final"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Canonical -> acceptable names (aliases)\nconst aliases = {\n  Priority:   ['Priority'],\n  Pending:    ['Pending', 'Priority/Pending'],\n  Admin:      ['Admin'],\n  Newsletter: ['Newsletter'],\n  Finance:    ['Finance', 'Personal Finance'],\n  n8nprocessed: ['n8n-processed'],\n};\n\n// Build a case-insensitive index: label-name -> id\nconst all = $json.labels || [];\nconst index = new Map(\n  all\n    .filter(l => l && l.name && l.id)\n    .map(l => [String(l.name).trim().toLowerCase(), l.id])\n);\n\n// Resolve each canonical name to the first matching alias\nconst labelsMap = {};\nconst missing = [];\n\nfor (const [canon, names] of Object.entries(aliases)) {\n  let id = null;\n  for (const n of names) {\n    const hit = index.get(n.toLowerCase());\n    if (hit) { id = hit; break; }\n  }\n  if (id) labelsMap[canon] = id;\n  else    missing.push(canon);\n}\n\n// (Optional) surface the aliases we saw, useful for debugging\nreturn [{\n  json: {\n    labelsMap,                 // { Priority:'Label_…', Pending:'Label_…', Finance:'Label_…', ... }\n    missing,                   // any canonical names still not found\n    totalLabelsSeen: all.length\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2784,
+        528
+      ],
+      "id": "51bf4719-e357-4331-b6f3-05d89b5bbce1",
+      "name": "Map"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-5-nano",
+          "mode": "list",
+          "cachedResultName": "GPT-5-NANO"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "Email Classification Refiner (Web-Aware, Medium Signal) — v2.0R\n\nROLE\n• Refine a candidate classification. Email content + headers are PRIMARY. Web results are a MEDIUM signal that can confirm/overturn when sender/domain authenticity affects the label.\n\nOUTPUT MODE\n• Return STRICT JSON only as ONE minified object; same schema as v2.0; use null/\"\"/[]/{} when N/A.\n• Never invent IDs/amounts/dates/phones/emails/URLs.\n\nLABELS & RULES\n• Use v2.0 label definitions and Section D tie-breakers/gates:\n  RT0_phishing_override (→ SPAM)\n  RT1_transactional_evidence (→ Personal Finance)\n  RT2_security_ops (→ Admin for auth/security/ops from core domains)\n  RT3_person_ask (→ Priority if G0 gates pass)\n  RT4_financial_promos (→ Newsletter for bank/fintech promos without posted charges/bills)\n  RT5_bulk_vs_unsolicited (Newsletter vs SPAM)\n  RT6_travel_event (Priority decision/RSVP vs Admin itinerary/logistics)\n  RT7_header_consistency (bulk headers → Newsletter unless overrides)\n\nWEB POLICY (MEDIUM signal)\n• needs_web_search=true if external verification COULD change/confirm the label (e.g., domain legitimacy, brand identity).\n• If needs_web_search=true: provide 2–5 short queries (≤17 words each) and set confidence_before_search.\n• used_web_search=true only if web influenced the outcome; include 1–3 canonical web_result_urls and a short web_search_summary (≤220 chars). Update confidence_after_search.\n• Do NOT import new amounts/IDs/dates from the web.\n\nSCORING & HYGIENE\n• Keep candidate fields unless corrected by rules. Populate entities/money/ids/phones_emails/evidence_spans from the email only.\n• urls: canonical domains, lowercase, ≤3. key_points ≤3 (≤12 words). suggested_actions ≤3. evidence_spans ≤2 (≤80 chars).\n• importance_score & phishing_risk_score per v2.0.\n• Ensure label_probs sum ≈1.0 and primary_label = argmax(label_probs); if adjusted, add \"consistency_fix\" to decision_rules_triggered.\n\nLENGTH GUARD\n• Minify JSON. Caps: explanation ≤180; second_best_reason ≤120; header_interpretation ≤120; web_search_summary ≤220; thread_hint ≤40; minimal_prompt_patch ≤120; reply_draft_short ≤120.\n• If near limit, shrink key_points/suggested_actions to 1 each, then blank non-essential fields; never drop keys.\n\nPROMPT VERSION\n• Set \"prompt_version\":\"v2.0R\".\n",
+              "role": "system"
+            },
+            {
+              "content": "=Set \"model_name\" in your output exactly to: {{$json.runtime_model_name || 'GPT-5-NANO'}}\n\nemail_json:\n{{ JSON.stringify({\n  from: $node[\"Extract Email Fields\"].json.from,\n  to: $node[\"Extract Email Fields\"].json.to,\n  cc: $node[\"Extract Email Fields\"].json.cc,\n  received_at: $node[\"Extract Email Fields\"].json.received_at,\n  subject: $node[\"Extract Email Fields\"].json.subject,\n  body_full: $node[\"Extract Email Fields\"].json.body_full\n}) }}\n\ncandidate_json:\n{{ JSON.stringify($node[\"Classifier\"].json) }}\n\nheader_flags:\n{{ JSON.stringify($node[\"Extract Email Fields\"].json.header_flags || {}) }}\n\nweb_results:\n{{ JSON.stringify($node[\"Summarize Results\"].json.web_results || []) }}\n\nReturn ONLY the strict minified JSON per schema (one line, no markdown/prose).\n"
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": {
+          "frequency_penalty": 0,
+          "presence_penalty": 0,
+          "topP": 1
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [
+        -1312,
+        1504
+      ],
+      "id": "690465d1-c025-4e4d-9288-2660a1741806",
+      "name": "Finalize Classification"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "c0dbb9ef-c204-4fb5-b6f2-5dee989cc4c9",
+              "name": "User_Key_iPhone",
+              "value": "",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        160,
+        1408
+      ],
+      "id": "39241d96-c0be-4a39-b866-e61a7f5cd889",
+      "name": "User_Key"
+    },
+    {
+      "parameters": {
+        "operation": "removeLabels",
+        "messageId": "={{ $node[\"Extract Email Fields\"].json[\"gmail_id\"] }}",
+        "labelIds": [
+          "CATEGORY_FORUMS",
+          "CATEGORY_PERSONAL",
+          "CATEGORY_PROMOTIONS",
+          "CATEGORY_SOCIAL",
+          "CATEGORY_UPDATES",
+          "SPAM",
+          "Label_6109609968514027906",
+          "Label_1049394865226329657",
+          "Label_5808454517259715638",
+          "Label_468811861220842471"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        160,
+        1600
+      ],
+      "id": "6d40f9a9-1b14-4070-9a2c-9181d5737887",
+      "name": "Remove label from important message1",
+      "webhookId": "3c64b3a4-cdb1-4f69-a786-134051f1a828",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "removeLabels",
+        "messageId": "={{ $node[\"Extract Email Fields\"].json[\"gmail_id\"] }}",
+        "labelIds": [
+          "CATEGORY_FORUMS",
+          "CATEGORY_PERSONAL",
+          "CATEGORY_PROMOTIONS",
+          "CATEGORY_SOCIAL",
+          "CATEGORY_UPDATES",
+          "SPAM",
+          "Label_6109609968514027906",
+          "Label_1049394865226329657",
+          "Label_5808454517259715638",
+          "Label_5923196818872817295",
+          "Label_7270558665040116563"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        160,
+        1984
+      ],
+      "id": "c52b7196-fce3-4fcb-bd05-d111897068fd",
+      "name": "Remove label from important message2",
+      "webhookId": "2039b721-2d73-4a55-a194-f8aed2874cea",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "removeLabels",
+        "messageId": "={{ $node[\"Extract Email Fields\"].json[\"gmail_id\"] }}",
+        "labelIds": [
+          "CATEGORY_FORUMS",
+          "CATEGORY_PERSONAL",
+          "CATEGORY_PROMOTIONS",
+          "CATEGORY_SOCIAL",
+          "CATEGORY_UPDATES",
+          "INBOX",
+          "IMPORTANT"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        160,
+        2560
+      ],
+      "id": "c37f3c70-d913-4556-9b1a-83a88c5e2a80",
+      "name": "Remove label from message1",
+      "webhookId": "5703ae36-65b0-4538-a718-e46337a55a7c",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "removeLabels",
+        "messageId": "={{ $node[\"Extract Email Fields\"].json[\"gmail_id\"] }}",
+        "labelIds": [
+          "CATEGORY_FORUMS",
+          "CATEGORY_PERSONAL",
+          "CATEGORY_PROMOTIONS",
+          "CATEGORY_SOCIAL",
+          "CATEGORY_UPDATES",
+          "SPAM",
+          "Label_6109609968514027906",
+          "Label_1049394865226329657",
+          "Label_5923196818872817295",
+          "Label_7270558665040116563",
+          "Label_468811861220842471"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        160,
+        2368
+      ],
+      "id": "ea28ce5b-1b86-42a0-8c19-d0a26f36d402",
+      "name": "Remove label from important message3",
+      "webhookId": "a5104e21-cd62-4c19-aae3-ac7e7106c788",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "models/gemini-2.5-pro",
+          "mode": "list",
+          "cachedResultName": "models/gemini-2.5-pro"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "STRICT OVERRIDE:\n- Do NOT produce functionCall, toolCall, or toolUse objects.\n- Do NOT use the API tool schema.\n- Treat the required JSON as plain text output only.\n- Output must be exactly one minified JSON object per schema, nothing else.\n\n\nYou are an email triage assistant for Harry.\n\nOUTPUT MODE\n• Return STRICT JSON only as ONE minified object (no newlines/prose/markdown).\n• Include EVERY key from the schema; if N/A use null/\"\"/[]/{} exactly.\n• Never invent URLs, IDs, phone numbers, money amounts, or dates not in the email (or obviously inferable like end-of-day for a date).\n• Apply gates and tie-breakers exactly. Ensure valid JSON (no trailing commas).\n\n------------------------------------\nA) OUTPUT SCHEMA (MUST include all keys exactly as named)\n{\n  \"primary_label\":\"Priority|Personal Finance|Admin|Newsletter|SPAM\",\n  \"secondary_labels\":[\"Pending|null\"],\n  \"importance_score\":0,\n  \"is_important\":false,\n  \"confidence\":0.0,\n  \"label_probs\":{\"Priority\":0.0,\"Personal Finance\":0.0,\"Admin\":0.0,\"Newsletter\":0.0,\"SPAM\":0.0},\n  \"second_best_label\":null,\n  \"second_best_reason\":\"\",\n  \"key_points\":[\"...\"],\n  \"explanation\":\"\",\n  \"deadline_utc\":\"YYYY-MM-DDTHH:mm:ssZ|null\",\n  \"reply_deadline_hint_utc\":\"YYYY-MM-DDTHH:mm:ssZ|null\",\n  \"suggested_actions\":[\"...\"],\n  \"action_required\":false,\n  \"action_type\":\"reply|schedule|pay|read|file|null\",\n  \"entities\":{\"people\":[],\"companies\":[],\"money\":[{\"amount\":0,\"currency\":\"USD\"}]},\n  \"ids_extracted\":{\"invoice_numbers\":[],\"order_numbers\":[],\"tracking_numbers\":[]},\n  \"phones_emails\":{\"phones\":[],\"emails\":[]},\n  \"language\":\"en|null\",\n  \"thread_hint\":\"\",\n  \"urls\":[],\n  \"needs_web_search\":false,\n  \"used_web_search\":false,\n  \"search_needed_reason\":\"\",\n  \"search_queries\":[],\n  \"domain_to_check\":null,\n  \"web_result_urls\":[],\n  \"web_search_summary\":\"\",\n  \"phishing_risk_score\":0,\n  \"phishing_signals\":[],\n  \"header_interpretation\":\"\",\n  \"uncertainty_reasons\":[],\n  \"evidence_spans\":[{\"field\":\"subject|body|from\",\"quote\":\"\"}],\n  \"model_name\":\"<SET_BY_CALLER>\",\n  \"prompt_version\":\"v2.0\",\n  \"rules_to_refine\":[],\n  \"minimal_prompt_patch\":\"\",\n  \"confidence_before_search\":0.0,\n  \"confidence_after_search\":0.0,\n  \"decision_rules_triggered\":[],\n  \"reply_draft_short\":\"\"\n}\n\n------------------------------------\nB) LABEL DEFINITIONS (choose EXACTLY ONE)\n\nPriority\n• Person-like sender (individual/small team) directly asks to decide/approve/confirm/respond soon; action unblocks work.\n• Must pass Priority Gates (Section D G0).\n• Exclude: bulk marketing, transactional docs, automated system notices without a human ask.\n\nPersonal Finance\n• Transactional money about accounts/obligations: invoices, statements, receipts, posted/declined charges, balances, refunds, taxes, insurance, rent, utilities, payroll, bank transfers.\n• Evidence: explicit amounts/balances OR invoice/receipt/statement OR account/card suffix OR payment/transfer confirmation.\n• Exclude: promotional “spend to earn”/offers without posted charge/bill/balance (→ Newsletter).\n\nAdmin\n• Non-financial logistics/operations: security/identity events, OTPs, resets, account/config changes, sign-in alerts, shipping/returns/delivery, itineraries/tickets/bookings, appointments, government/IT notices, service advisories.\n• Use when core purpose is operational/security and not a transactional bill (PF) or a person-like ask (Priority).\n\nNewsletter\n• Bulk/opt-in messages to broad audiences: promos, product announcements, release notes, digests, educational/community updates (incl. bank/fintech promos without posted charges/bills/balances).\n• Strong bulk cues: unsubscribe/List-ID/tracking links/generic template/periodic cadence.\n\nSPAM\n• Unsolicited/deceptive/phishing/malware; spoofed brands; blasts without reasonable opt-in; credential harvesting/payload attempts. Prefer SPAM when multiple high-risk signals and no strong opt-in cues.\n\n------------------------------------\nC) SECONDARY LABELS\n• Only \"Pending\" is allowed.\n• Set \"Pending\" ONLY if primary_label=\"Priority\" AND the email explicitly indicates the other party owes a reply/follow-up.\n• Else exactly [\"null\"].\n\n------------------------------------\nD) HARD GATES & TIE-BREAKERS (first true wins; record names in decision_rules_triggered)\n\nG0_priority_gates (MUST be TRUE for Priority)\n• header_flags.hasBulk=false AND header_flags.hasListId=false AND header_flags.isNoReply=false.\n• If any fail → NOT Priority (evaluate other labels).\n\nTB0_phishing_override → SPAM\n• Multiple high-risk signals (e.g., auth failure + domain mismatch OR credential-harvest intent) and no strong opt-in cues.\n\nTB1_transactional_evidence → Personal Finance\n• Clear money evidence (any of): amount/balance due/posted/charged; invoice/receipt/statement; account/card suffix; payment/transfer confirmation.\n• Exception: pure promo thresholds with no posted charge/bill → TB4.\n\nTB2_security_ops → Admin\n• Authentication/security notices (passkeys, sign-in alerts, resets, OTPs), account/config changes, or system advisories from core service domains → Admin unless TB1 already applied.\n\nTB3_person_ask → Priority\n• Person-like direct request for decision/approval/confirmation/answer with timeframe AND G0 gates satisfied.\n• Exception: if verifiable transactional docs exist, prefer Personal Finance.\n\nTB4_financial_promos → Newsletter\n• Bank/fintech promotional content without posted charge/bill/balance due MUST be Newsletter.\n\nTB5_bulk_vs_unsolicited\n• Strong bulk/opt-in cues + reputable domain alignment → Newsletter.\n• Missing opt-in cues + risk signals → SPAM.\n\nTB6_travel_event\n• Explicit RSVP/decision ask → Priority (if G0 gates pass). Pure itinerary/ticket/logistics → Admin.\n\nTB7_header_consistency\n• Bulk headers + personal-sounding content → Newsletter unless TB0/TB1 apply.\n• Personal headers + bulk-sounding content → Admin/Priority as per TB2/TB3.\n\nTB8_Action\n• Propose actions only when required; else action_required=false, action_type=\"null\", suggested_actions=[].\n• If primary_label=\"SPAM\" or TB0 fired → null as above.\n\nGates (first true wins)\nA) Money due/collectible now (TB1 evidence) → action_type=\"pay\".\nB) Person-like direct ask with timeframe and G0 passes → \"reply\".\nC) Dated event user should attend/prepare → \"schedule\".\nD) Security/account step required (reset/verify/approve) → \"read\".\nElse → \"null\".\n\n------------------------------------\nE) SCORING & HYGIENE\n• importance_score 0–100: urgency/impact (urgent Priority, account compromise, large unexpected charge → higher; routine info → lower).\n• phishing_risk_score 0–100: minimal(0–19), mild(20–49), concerning(50–79), likely(80–100).\n• urls: canonical domains, lowercase, ≤3.\n• key_points: 1–3 bullets, ≤12 words each. suggested_actions: 1–3 short imperatives.\n• evidence_spans: ≤2 tiny quotes (≤80 chars) from the email only.\n• deadline_utc: if an offer/event end date exists, set to that date 23:59:59Z; if a specific time exists, use exactly; else null.\n• reply_deadline_hint_utc: set only if a “respond by” is explicit/implied.\n• language: ISO-639-1 or null.\n\n------------------------------------\nF) SELF-CONSISTENCY & LENGTH GUARD\n• Ensure label_probs sum ≈1.0 and primary_label = argmax(label_probs). If not, set primary_label to argmax and add \"consistency_fix\" to decision_rules_triggered.\n• Minify JSON (no pretty-print). Caps: explanation ≤180 chars; second_best_reason ≤120; header_interpretation ≤120; web_search_summary ≤220; thread_hint ≤40; minimal_prompt_patch ≤120; reply_draft_short ≤120.\n• If near limit: first reduce key_points/suggested_actions to 1 each; then blank second_best_reason/uncertainty_reasons/rules_to_refine/web_search_summary; never drop keys.\n\nNO WEB\n• Do not use external web. Set needs_web_search only if a later refiner should verify; then include 2–5 short queries (≤17 words) and confidence_before_search.",
+              "role": "model"
+            },
+            {
+              "content": "=Set \"model_name\" in your output exactly to: {{$json.runtime_model_name || 'gemini'}}\n\nHeaders (JSON):\n{{ JSON.stringify($node[\"Extract Email Fields\"].json[\"header_flags\"]) }}\n\nEnvelope:\nFrom: {{$node[\"Extract Email Fields\"].json[\"from\"]}}\nTo: {{$node[\"Extract Email Fields\"].json[\"to\"]}}\nCc: {{$node[\"Extract Email Fields\"].json[\"cc\"]}}\nDate: {{$node[\"Extract Email Fields\"].json[\"received_at\"]}}\nSubject: {{$node[\"Extract Email Fields\"].json[\"subject\"]}}\n\nBody (full plain text):\n{{$node[\"Extract Email Fields\"].json[\"body_full\"]}}\n\nReturn ONLY the strict minified JSON per schema (one line, no markdown/prose).\n"
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": {
+          "systemMessage": "STRICT OVERRIDE: - Do NOT produce functionCall, toolCall, or toolUse objects. - Do NOT use the API tool schema. - Treat the required JSON as plain text output only. - Output must be exactly one minified JSON object per schema, nothing else.   You are an email triage assistant for Harry.  OUTPUT MODE • Return STRICT JSON only as ONE minified object (no newlines/prose/markdown). • Include EVERY key from the schema; if N/A use null/\"\"/[]/{} exactly. • Never invent URLs, IDs, phone numbers, money amounts, or dates not in the email (or obviously inferable like end-of-day for a date). • Apply gates and tie-breakers exactly. Ensure valid JSON (no trailing commas).  ------------------------------------ A) OUTPUT SCHEMA (MUST include all keys exactly as named) {   \"primary_label\":\"Priority|Personal Finance|Admin|Newsletter|SPAM\",   \"secondary_labels\":[\"Pending|null\"],   \"importance_score\":0,   \"is_important\":false,   \"confidence\":0.0,   \"label_probs\":{\"Priority\":0.0,\"Personal Finance\":0.0,\"Admin\":0.0,\"Newsletter\":0.0,\"SPAM\":0.0},   \"second_best_label\":null,   \"second_best_reason\":\"\",   \"key_points\":[\"...\"],   \"explanation\":\"\",   \"deadline_utc\":\"YYYY-MM-DDTHH:mm:ssZ|null\",   \"reply_deadline_hint_utc\":\"YYYY-MM-DDTHH:mm:ssZ|null\",   \"suggested_actions\":[\"...\"],   \"action_required\":false,   \"action_type\":\"reply|schedule|pay|read|file|null\",   \"entities\":{\"people\":[],\"companies\":[],\"money\":[{\"amount\":0,\"currency\":\"USD\"}]},   \"ids_extracted\":{\"invoice_numbers\":[],\"order_numbers\":[],\"tracking_numbers\":[]},   \"phones_emails\":{\"phones\":[],\"emails\":[]},   \"language\":\"en|null\",   \"thread_hint\":\"\",   \"urls\":[],   \"needs_web_search\":false,   \"used_web_search\":false,   \"search_needed_reason\":\"\",   \"search_queries\":[],   \"domain_to_check\":null,   \"web_result_urls\":[],   \"web_search_summary\":\"\",   \"phishing_risk_score\":0,   \"phishing_signals\":[],   \"header_interpretation\":\"\",   \"uncertainty_reasons\":[],   \"evidence_spans\":[{\"field\":\"subject|body|from\",\"quote\":\"\"}],   \"model_name\":\"<SET_BY_CALLER>\",   \"prompt_version\":\"v2.0\",   \"rules_to_refine\":[],   \"minimal_prompt_patch\":\"\",   \"confidence_before_search\":0.0,   \"confidence_after_search\":0.0,   \"decision_rules_triggered\":[],   \"reply_draft_short\":\"\" }  ------------------------------------ B) LABEL DEFINITIONS (choose EXACTLY ONE)  Priority • Person-like sender (individual/small team) directly asks to decide/approve/confirm/respond soon; action unblocks work. • Must pass Priority Gates (Section D G0). • Exclude: bulk marketing, transactional docs, automated system notices without a human ask.  Personal Finance • Transactional money about accounts/obligations: invoices, statements, receipts, posted/declined charges, balances, refunds, taxes, insurance, rent, utilities, payroll, bank transfers. • Evidence: explicit amounts/balances OR invoice/receipt/statement OR account/card suffix OR payment/transfer confirmation. • Exclude: promotional “spend to earn”/offers without posted charge/bill/balance (→ Newsletter).  Admin • Non-financial logistics/operations: security/identity events, OTPs, resets, account/config changes, sign-in alerts, shipping/returns/delivery, itineraries/tickets/bookings, appointments, government/IT notices, service advisories. • Use when core purpose is operational/security and not a transactional bill (PF) or a person-like ask (Priority).  Newsletter • Bulk/opt-in messages to broad audiences: promos, product announcements, release notes, digests, educational/community updates (incl. bank/fintech promos without posted charges/bills/balances). • Strong bulk cues: unsubscribe/List-ID/tracking links/generic template/periodic cadence.  SPAM • Unsolicited/deceptive/phishing/malware; spoofed brands; blasts without reasonable opt-in; credential harvesting/payload attempts. Prefer SPAM when multiple high-risk signals and no strong opt-in cues.  ------------------------------------ C) SECONDARY LABELS • Only \"Pending\" is allowed. • Set \"Pending\" ONLY if primary_label=\"Priority\" AND the email explicitly indicates the other party owes a reply/follow-up. • Else exactly [\"null\"].  ------------------------------------ D) HARD GATES & TIE-BREAKERS (first true wins; record names in decision_rules_triggered)  G0_priority_gates (MUST be TRUE for Priority) • header_flags.hasBulk=false AND header_flags.hasListId=false AND header_flags.isNoReply=false. • If any fail → NOT Priority (evaluate other labels).  TB0_phishing_override → SPAM • Multiple high-risk signals (e.g., auth failure + domain mismatch OR credential-harvest intent) and no strong opt-in cues.  TB1_transactional_evidence → Personal Finance • Clear money evidence (any of): amount/balance due/posted/charged; invoice/receipt/statement; account/card suffix; payment/transfer confirmation. • Exception: pure promo thresholds with no posted charge/bill → TB4.  TB2_security_ops → Admin • Authentication/security notices (passkeys, sign-in alerts, resets, OTPs), account/config changes, or system advisories from core service domains → Admin unless TB1 already applied.  TB3_person_ask → Priority • Person-like direct request for decision/approval/confirmation/answer with timeframe AND G0 gates satisfied. • Exception: if verifiable transactional docs exist, prefer Personal Finance.  TB4_financial_promos → Newsletter • Bank/fintech promotional content without posted charge/bill/balance due MUST be Newsletter.  TB5_bulk_vs_unsolicited • Strong bulk/opt-in cues + reputable domain alignment → Newsletter. • Missing opt-in cues + risk signals → SPAM.  TB6_travel_event • Explicit RSVP/decision ask → Priority (if G0 gates pass). Pure itinerary/ticket/logistics → Admin.  TB7_header_consistency • Bulk headers + personal-sounding content → Newsletter unless TB0/TB1 apply. • Personal headers + bulk-sounding content → Admin/Priority as per TB2/TB3.  ------------------------------------ E) SCORING & HYGIENE • importance_score 0–100: urgency/impact (urgent Priority, account compromise, large unexpected charge → higher; routine info → lower). • phishing_risk_score 0–100: minimal(0–19), mild(20–49), concerning(50–79), likely(80–100). • urls: canonical domains, lowercase, ≤3. • key_points: 1–3 bullets, ≤12 words each. suggested_actions: 1–3 short imperatives. • evidence_spans: ≤2 tiny quotes (≤80 chars) from the email only. • deadline_utc: if an offer/event end date exists, set to that date 23:59:59Z; if a specific time exists, use exactly; else null. • reply_deadline_hint_utc: set only if a “respond by” is explicit/implied. • language: ISO-639-1 or null.  ------------------------------------ F) SELF-CONSISTENCY & LENGTH GUARD • Ensure label_probs sum ≈1.0 and primary_label = argmax(label_probs). If not, set primary_label to argmax and add \"consistency_fix\" to decision_rules_triggered. • Minify JSON (no pretty-print). Caps: explanation ≤180 chars; second_best_reason ≤120; header_interpretation ≤120; web_search_summary ≤220; thread_hint ≤40; minimal_prompt_patch ≤120; reply_draft_short ≤120. • If near limit: first reduce key_points/suggested_actions to 1 each; then blank second_best_reason/uncertainty_reasons/rules_to_refine/web_search_summary; never drop keys.  NO WEB • Do not use external web. Set needs_web_search only if a later refiner should verify; then include 2–5 short queries (≤17 words) and confidence_before_search.",
+          "frequencyPenalty": 0,
+          "maxOutputTokens": 24000,
+          "presencePenalty": 0,
+          "temperature": 0.1,
+          "topP": 1,
+          "topK": 1,
+          "maxToolsIterations": 0
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.googleGemini",
+      "typeVersion": 1,
+      "position": [
+        -2560,
+        1024
+      ],
+      "id": "d0781632-f9f3-436b-a05d-3fddb7c09c9f",
+      "name": "Gemini - Classification",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "models/gemini-2.5-pro",
+          "mode": "list",
+          "cachedResultName": "models/gemini-2.5-pro"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "STRICT OVERRIDE:\n- Do NOT produce functionCall, toolCall, or toolUse objects.\n- Do NOT use the API tool schema.\n- Treat the required JSON as plain text output only.\n- Output must be exactly one minified JSON object per schema, nothing else.\n\nEmail Classification Refiner (Web-Aware, Medium Signal) — v2.0R\n\nROLE\n• Refine a candidate classification. Email content + headers are PRIMARY. Web results are a MEDIUM signal that can confirm/overturn when sender/domain authenticity affects the label.\n\nOUTPUT MODE\n• Return STRICT JSON only as ONE minified object; same schema as v2.0; use null/\"\"/[]/{} when N/A.\n• Never invent IDs/amounts/dates/phones/emails/URLs.\n\nLABELS & RULES\n• Use v2.0 label definitions and Section D tie-breakers/gates:\n  RT0_phishing_override (→ SPAM)\n  RT1_transactional_evidence (→ Personal Finance)\n  RT2_security_ops (→ Admin for auth/security/ops from core domains)\n  RT3_person_ask (→ Priority if G0 gates pass)\n  RT4_financial_promos (→ Newsletter for bank/fintech promos without posted charges/bills)\n  RT5_bulk_vs_unsolicited (Newsletter vs SPAM)\n  RT6_travel_event (Priority decision/RSVP vs Admin itinerary/logistics)\n  RT7_header_consistency (bulk headers → Newsletter unless overrides)\n\nWEB POLICY (MEDIUM signal)\n• needs_web_search=true if external verification COULD change/confirm the label (e.g., domain legitimacy, brand identity).\n• If needs_web_search=true: provide 2–5 short queries (≤17 words each) and set confidence_before_search.\n• used_web_search=true only if web influenced the outcome; include 1–3 canonical web_result_urls and a short web_search_summary (≤220 chars). Update confidence_after_search.\n• Do NOT import new amounts/IDs/dates from the web.\n\nSCORING & HYGIENE\n• Keep candidate fields unless corrected by rules. Populate entities/money/ids/phones_emails/evidence_spans from the email only.\n• urls: canonical domains, lowercase, ≤3. key_points ≤3 (≤12 words). suggested_actions ≤3. evidence_spans ≤2 (≤80 chars).\n• importance_score & phishing_risk_score per v2.0.\n• Ensure label_probs sum ≈1.0 and primary_label = argmax(label_probs); if adjusted, add \"consistency_fix\" to decision_rules_triggered.\n\nLENGTH GUARD\n• Minify JSON. Caps: explanation ≤180; second_best_reason ≤120; header_interpretation ≤120; web_search_summary ≤220; thread_hint ≤40; minimal_prompt_patch ≤120; reply_draft_short ≤120.\n• If near limit, shrink key_points/suggested_actions to 1 each, then blank non-essential fields; never drop keys.\n\nPROMPT VERSION\n• Set \"prompt_version\":\"v2.0R\".\n",
+              "role": "model"
+            },
+            {
+              "content": "=Set \"model_name\" in your output exactly to: {{$json.runtime_model_name || 'GPT-5-NANO'}}\n\nemail_json:\n{{ JSON.stringify({\n  from: $node[\"Extract Email Fields\"].json.from,\n  to: $node[\"Extract Email Fields\"].json.to,\n  cc: $node[\"Extract Email Fields\"].json.cc,\n  received_at: $node[\"Extract Email Fields\"].json.received_at,\n  subject: $node[\"Extract Email Fields\"].json.subject,\n  body_full: $node[\"Extract Email Fields\"].json.body_full\n}) }}\n\ncandidate_json:\n{{ JSON.stringify($node[\"Classifier\"].json) }}\n\nheader_flags:\n{{ JSON.stringify($node[\"Extract Email Fields\"].json.header_flags || {}) }}\n\nweb_results:\n{{ JSON.stringify($node[\"Summarize Results\"].json.web_results || []) }}\n\nReturn ONLY the strict minified JSON per schema (one line, no markdown/prose).\n"
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": {
+          "systemMessage": "STRICT OVERRIDE: - Do NOT produce functionCall, toolCall, or toolUse objects. - Do NOT use the API tool schema. - Treat the required JSON as plain text output only. - Output must be exactly one minified JSON object per schema, nothing else.   You are an email triage assistant for Harry.  OUTPUT MODE • Return STRICT JSON only as ONE minified object (no newlines/prose/markdown). • Include EVERY key from the schema; if N/A use null/\"\"/[]/{} exactly. • Never invent URLs, IDs, phone numbers, money amounts, or dates not in the email (or obviously inferable like end-of-day for a date). • Apply gates and tie-breakers exactly. Ensure valid JSON (no trailing commas).  ------------------------------------ A) OUTPUT SCHEMA (MUST include all keys exactly as named) {   \"primary_label\":\"Priority|Personal Finance|Admin|Newsletter|SPAM\",   \"secondary_labels\":[\"Pending|null\"],   \"importance_score\":0,   \"is_important\":false,   \"confidence\":0.0,   \"label_probs\":{\"Priority\":0.0,\"Personal Finance\":0.0,\"Admin\":0.0,\"Newsletter\":0.0,\"SPAM\":0.0},   \"second_best_label\":null,   \"second_best_reason\":\"\",   \"key_points\":[\"...\"],   \"explanation\":\"\",   \"deadline_utc\":\"YYYY-MM-DDTHH:mm:ssZ|null\",   \"reply_deadline_hint_utc\":\"YYYY-MM-DDTHH:mm:ssZ|null\",   \"suggested_actions\":[\"...\"],   \"action_required\":false,   \"action_type\":\"reply|schedule|pay|read|file|null\",   \"entities\":{\"people\":[],\"companies\":[],\"money\":[{\"amount\":0,\"currency\":\"USD\"}]},   \"ids_extracted\":{\"invoice_numbers\":[],\"order_numbers\":[],\"tracking_numbers\":[]},   \"phones_emails\":{\"phones\":[],\"emails\":[]},   \"language\":\"en|null\",   \"thread_hint\":\"\",   \"urls\":[],   \"needs_web_search\":false,   \"used_web_search\":false,   \"search_needed_reason\":\"\",   \"search_queries\":[],   \"domain_to_check\":null,   \"web_result_urls\":[],   \"web_search_summary\":\"\",   \"phishing_risk_score\":0,   \"phishing_signals\":[],   \"header_interpretation\":\"\",   \"uncertainty_reasons\":[],   \"evidence_spans\":[{\"field\":\"subject|body|from\",\"quote\":\"\"}],   \"model_name\":\"<SET_BY_CALLER>\",   \"prompt_version\":\"v2.0\",   \"rules_to_refine\":[],   \"minimal_prompt_patch\":\"\",   \"confidence_before_search\":0.0,   \"confidence_after_search\":0.0,   \"decision_rules_triggered\":[],   \"reply_draft_short\":\"\" }  ------------------------------------ B) LABEL DEFINITIONS (choose EXACTLY ONE)  Priority • Person-like sender (individual/small team) directly asks to decide/approve/confirm/respond soon; action unblocks work. • Must pass Priority Gates (Section D G0). • Exclude: bulk marketing, transactional docs, automated system notices without a human ask.  Personal Finance • Transactional money about accounts/obligations: invoices, statements, receipts, posted/declined charges, balances, refunds, taxes, insurance, rent, utilities, payroll, bank transfers. • Evidence: explicit amounts/balances OR invoice/receipt/statement OR account/card suffix OR payment/transfer confirmation. • Exclude: promotional “spend to earn”/offers without posted charge/bill/balance (→ Newsletter).  Admin • Non-financial logistics/operations: security/identity events, OTPs, resets, account/config changes, sign-in alerts, shipping/returns/delivery, itineraries/tickets/bookings, appointments, government/IT notices, service advisories. • Use when core purpose is operational/security and not a transactional bill (PF) or a person-like ask (Priority).  Newsletter • Bulk/opt-in messages to broad audiences: promos, product announcements, release notes, digests, educational/community updates (incl. bank/fintech promos without posted charges/bills/balances). • Strong bulk cues: unsubscribe/List-ID/tracking links/generic template/periodic cadence.  SPAM • Unsolicited/deceptive/phishing/malware; spoofed brands; blasts without reasonable opt-in; credential harvesting/payload attempts. Prefer SPAM when multiple high-risk signals and no strong opt-in cues.  ------------------------------------ C) SECONDARY LABELS • Only \"Pending\" is allowed. • Set \"Pending\" ONLY if primary_label=\"Priority\" AND the email explicitly indicates the other party owes a reply/follow-up. • Else exactly [\"null\"].  ------------------------------------ D) HARD GATES & TIE-BREAKERS (first true wins; record names in decision_rules_triggered)  G0_priority_gates (MUST be TRUE for Priority) • header_flags.hasBulk=false AND header_flags.hasListId=false AND header_flags.isNoReply=false. • If any fail → NOT Priority (evaluate other labels).  TB0_phishing_override → SPAM • Multiple high-risk signals (e.g., auth failure + domain mismatch OR credential-harvest intent) and no strong opt-in cues.  TB1_transactional_evidence → Personal Finance • Clear money evidence (any of): amount/balance due/posted/charged; invoice/receipt/statement; account/card suffix; payment/transfer confirmation. • Exception: pure promo thresholds with no posted charge/bill → TB4.  TB2_security_ops → Admin • Authentication/security notices (passkeys, sign-in alerts, resets, OTPs), account/config changes, or system advisories from core service domains → Admin unless TB1 already applied.  TB3_person_ask → Priority • Person-like direct request for decision/approval/confirmation/answer with timeframe AND G0 gates satisfied. • Exception: if verifiable transactional docs exist, prefer Personal Finance.  TB4_financial_promos → Newsletter • Bank/fintech promotional content without posted charge/bill/balance due MUST be Newsletter.  TB5_bulk_vs_unsolicited • Strong bulk/opt-in cues + reputable domain alignment → Newsletter. • Missing opt-in cues + risk signals → SPAM.  TB6_travel_event • Explicit RSVP/decision ask → Priority (if G0 gates pass). Pure itinerary/ticket/logistics → Admin.  TB7_header_consistency • Bulk headers + personal-sounding content → Newsletter unless TB0/TB1 apply. • Personal headers + bulk-sounding content → Admin/Priority as per TB2/TB3.  ------------------------------------ E) SCORING & HYGIENE • importance_score 0–100: urgency/impact (urgent Priority, account compromise, large unexpected charge → higher; routine info → lower). • phishing_risk_score 0–100: minimal(0–19), mild(20–49), concerning(50–79), likely(80–100). • urls: canonical domains, lowercase, ≤3. • key_points: 1–3 bullets, ≤12 words each. suggested_actions: 1–3 short imperatives. • evidence_spans: ≤2 tiny quotes (≤80 chars) from the email only. • deadline_utc: if an offer/event end date exists, set to that date 23:59:59Z; if a specific time exists, use exactly; else null. • reply_deadline_hint_utc: set only if a “respond by” is explicit/implied. • language: ISO-639-1 or null.  ------------------------------------ F) SELF-CONSISTENCY & LENGTH GUARD • Ensure label_probs sum ≈1.0 and primary_label = argmax(label_probs). If not, set primary_label to argmax and add \"consistency_fix\" to decision_rules_triggered. • Minify JSON (no pretty-print). Caps: explanation ≤180 chars; second_best_reason ≤120; header_interpretation ≤120; web_search_summary ≤220; thread_hint ≤40; minimal_prompt_patch ≤120; reply_draft_short ≤120. • If near limit: first reduce key_points/suggested_actions to 1 each; then blank second_best_reason/uncertainty_reasons/rules_to_refine/web_search_summary; never drop keys.  NO WEB • Do not use external web. Set needs_web_search only if a later refiner should verify; then include 2–5 short queries (≤17 words) and confidence_before_search.",
+          "frequencyPenalty": 0,
+          "maxOutputTokens": 24000,
+          "presencePenalty": 0,
+          "temperature": 0.1,
+          "topP": 1,
+          "topK": 1,
+          "maxToolsIterations": 0
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.googleGemini",
+      "typeVersion": 1,
+      "position": [
+        -1312,
+        976
+      ],
+      "id": "dce68b16-b914-4a5b-af9e-cf162fda76c2",
+      "name": "Gemini - Final Classification",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1KW7cycfPX2HqcitpscXi3CKxhMzltaBedjippOgevQY",
+          "mode": "list",
+          "cachedResultName": "n8n",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1KW7cycfPX2HqcitpscXi3CKxhMzltaBedjippOgevQY/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 931459294,
+          "mode": "list",
+          "cachedResultName": "LLM_full",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1KW7cycfPX2HqcitpscXi3CKxhMzltaBedjippOgevQY/edit#gid=931459294"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "dedup_key": "={{$node[\"Extract Email Fields\"].json[\"dedup_key\"]}}",
+            "gmail_id": "={{$node[\"Extract Email Fields\"].json[\"gmail_id\"]}}",
+            "thread_id": "={{$node[\"Extract Email Fields\"].json[\"thread_id\"]}}",
+            "message_id": "={{$node[\"Extract Email Fields\"].json[\"message_id\"]}}",
+            "subject": "={{$node[\"Extract Email Fields\"].json[\"subject\"]}}",
+            "confidence": "={{ $json.confidence }}",
+            "label_probs": "={{ $json.label_probs }}",
+            "second_best_label": "={{ $json.second_best_label }}",
+            "second_best_reason": "={{ $json.second_best_reason }}",
+            "explanation": "={{ $json.explanation }}",
+            "reply_deadline_hint_utc": "={{ $json.reply_deadline_hint_utc }}",
+            "action_required": "={{ $json.action_required }}",
+            "action_type": "={{ $json.action_type }}",
+            "entities": "={{ $json.entities }}",
+            "ids_extracted": "={{ $json.ids_extracted }}",
+            "phones_emails": "={{ $json.phones_emails }}",
+            "language": "={{ $json.language }}",
+            "urls": "={{ $json.urls }}",
+            "needs_web_search": "={{ $json.needs_web_search }}",
+            "used_web_search": "={{ $json.used_web_search }}",
+            "search_needed_reason": "={{ $json.search_needed_reason }}",
+            "search_queries": "={{ $json.search_queries }}",
+            "domain_to_check": "={{ $json.domain_to_check }}",
+            "web_result_urls": "={{ $json.web_result_urls }}",
+            "web_search_summary": "={{ $json.web_search_summary }}",
+            "phishing_risk_score": "={{ $json.phishing_risk_score }}",
+            "phishing_signals": "={{ $json.phishing_signals }}",
+            "header_interpretation": "={{ $json.header_interpretation }}",
+            "uncertainty_reasons": "={{ $json.uncertainty_reasons }}",
+            "evidence_spans": "={{ $json.evidence_spans }}",
+            "model_name": "={{ $json.model_name }}",
+            "prompt_version": "={{ $json.prompt_version }}",
+            "rules_to_refine": "={{ $json.rules_to_refine }}",
+            "minimal_prompt_patch": "={{ $json.minimal_prompt_patch }}",
+            "confidence_before_search": "={{ $json.confidence_before_search }}",
+            "confidence_after_search": "={{ $json.confidence_after_search }}",
+            "decision_rules_triggered": "={{ $json.decision_rules_triggered }}",
+            "reply_draft_short": "={{ $json.reply_draft_short }}",
+            "primary_label": "={{ $json.primary_label }}",
+            "secondary_labels": "={{ $json.secondary_labels }}",
+            "importance_score": "={{ $json.importance_score }}",
+            "is_important": "={{ $json.is_important }}",
+            "key_points": "={{ $json.key_points }}",
+            "deadline_utc": "={{ $json.deadline_utc }}",
+            "suggested_actions": "={{ $json.suggested_actions }}",
+            "thread_hint": "={{ $json.thread_hint }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "dedup_key",
+              "displayName": "dedup_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "gmail_id",
+              "displayName": "gmail_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "thread_id",
+              "displayName": "thread_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "message_id",
+              "displayName": "message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "subject",
+              "displayName": "subject",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "confidence",
+              "displayName": "confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "label_probs",
+              "displayName": "label_probs",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "second_best_label",
+              "displayName": "second_best_label",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "second_best_reason",
+              "displayName": "second_best_reason",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "explanation",
+              "displayName": "explanation",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "reply_deadline_hint_utc",
+              "displayName": "reply_deadline_hint_utc",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "action_required",
+              "displayName": "action_required",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "action_type",
+              "displayName": "action_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "entities",
+              "displayName": "entities",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "ids_extracted",
+              "displayName": "ids_extracted",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "phones_emails",
+              "displayName": "phones_emails",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "language",
+              "displayName": "language",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "urls",
+              "displayName": "urls",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "needs_web_search",
+              "displayName": "needs_web_search",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "used_web_search",
+              "displayName": "used_web_search",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "search_needed_reason",
+              "displayName": "search_needed_reason",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "search_queries",
+              "displayName": "search_queries",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "domain_to_check",
+              "displayName": "domain_to_check",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "web_result_urls",
+              "displayName": "web_result_urls",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "web_search_summary",
+              "displayName": "web_search_summary",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "evidence_spans",
+              "displayName": "evidence_spans",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "phishing_risk_score",
+              "displayName": "phishing_risk_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "phishing_signals",
+              "displayName": "phishing_signals",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "header_interpretation",
+              "displayName": "header_interpretation",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "uncertainty_reasons",
+              "displayName": "uncertainty_reasons",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "model_name",
+              "displayName": "model_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "prompt_version",
+              "displayName": "prompt_version",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "rules_to_refine",
+              "displayName": "rules_to_refine",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "minimal_prompt_patch",
+              "displayName": "minimal_prompt_patch",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "confidence_before_search",
+              "displayName": "confidence_before_search",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "confidence_after_search",
+              "displayName": "confidence_after_search",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "decision_rules_triggered",
+              "displayName": "decision_rules_triggered",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "reply_draft_short",
+              "displayName": "reply_draft_short",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "primary_label",
+              "displayName": "primary_label",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "secondary_labels",
+              "displayName": "secondary_labels",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "importance_score",
+              "displayName": "importance_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "is_important",
+              "displayName": "is_important",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "key_points",
+              "displayName": "key_points",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "deadline_utc",
+              "displayName": "deadline_utc",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "suggested_actions",
+              "displayName": "suggested_actions",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "thread_hint",
+              "displayName": "thread_hint",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -512,
+        1024
+      ],
+      "id": "28f9449a-554d-4771-bd47-e52ace38a6de",
+      "name": "LLM full Log",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -4128,
+        528
+      ],
+      "id": "39934c19-456f-45b6-bf21-043e03b0b4cc",
+      "name": "First Time Running"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1KW7cycfPX2HqcitpscXi3CKxhMzltaBedjippOgevQY",
+          "mode": "list",
+          "cachedResultName": "n8n",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1KW7cycfPX2HqcitpscXi3CKxhMzltaBedjippOgevQY/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 612826169,
+          "mode": "list",
+          "cachedResultName": "emails_index",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1KW7cycfPX2HqcitpscXi3CKxhMzltaBedjippOgevQY/edit#gid=612826169"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "dedup_key": "={{$node['Extract Email Fields'].json['dedup_key']}}",
+            "gmail_id": "={{$node['Extract Email Fields'].json['gmail_id']}}",
+            "thread_id": "={{$node['Extract Email Fields'].json['thread_id']}}",
+            "message_id": "={{ String($node['Extract Email Fields'].json['message_id'] || '').replace(/^<|>$/g, '') }}\n",
+            "received_at": "={{$node['Extract Email Fields'].json['received_at']}}",
+            "from": "={{$node['Extract Email Fields'].json['from']}}",
+            "subject": "={{$node['Extract Email Fields'].json['subject']}}",
+            "snippet": "={{ String($node['Extract Email Fields'].json['snippet'] || '').replace(/\\s+/g,' ').slice(0,200) }}\n",
+            "primary_label": "={{ $json.primary_label }}",
+            "secondary_labels": "={{ ($json.secondary_labels || []).join('; ') }}",
+            "importance_score": "={{ Number($json.importance_score ?? 0) }}\n",
+            "is_important": "={{ Boolean($json.is_important) }}\n",
+            "deadline_utc": "={{ $json.deadline_utc || '' }}\n",
+            "key_points": "={{ ($json.key_points || []).join('; ') }}",
+            "suggested_actions": "={{ ($json.suggested_actions || []).join('; ') }}\n",
+            "thread_hint": "={{ $json.thread_hint || '' }}\n",
+            "header_flags": "={{ Object.entries($node['Extract Email Fields'].json['header_flags'] || {})\n    .filter(([k,v]) => !!v)\n    .map(([k]) => k)\n    .join('; ') }}\n",
+            "source_mailbox": "={{$node['Extract Email Fields'].json['source_mailbox']}}",
+            "body_preview": "={{ $('Extract Email Fields').item.json.body_preview }}",
+            "to": "={{$node['Extract Email Fields'].json['to']}}",
+            "cc": "={{$node['Extract Email Fields'].json['cc']}}",
+            "confidence": "={{ $json.confidence }}",
+            "label_probs": "={{ $json.label_probs }}",
+            "second_best_label": "={{ $json.second_best_label }}",
+            "second_best_reason": "={{ $json.second_best_reason }}",
+            "explanation": "={{ $json.explanation }}",
+            "reply_deadline_hint_utc": "={{ $json.reply_deadline_hint_utc }}",
+            "action_required": "={{ $json.action_required }}",
+            "action_type": "={{ $json.action_type }}",
+            "entities": "={{ $json.entities }}",
+            "ids_extracted": "={{ $json.ids_extracted }}",
+            "phones_emails": "={{ $json.phones_emails }}",
+            "language": "={{ $json.language }}",
+            "urls": "={{ $json.urls }}",
+            "needs_web_search": "={{ $json.needs_web_search }}",
+            "used_web_search": "={{ $json.used_web_search }}",
+            "search_needed_reason": "={{ $json.search_needed_reason }}",
+            "search_queries": "={{ $json.search_queries }}",
+            "domain_to_check": "={{ $json.domain_to_check }}",
+            "web_result_urls": "={{ $json.web_result_urls }}",
+            "web_search_summary": "={{ $json.web_search_summary }}",
+            "phishing_risk_score": "={{ $json.phishing_risk_score }}",
+            "phishing_signals": "={{ $json.phishing_signals }}",
+            "header_interpretation": "={{ $json.header_interpretation }}",
+            "uncertainty_reasons": "={{ $json.uncertainty_reasons }}",
+            "evidence_spans": "={{ $json.evidence_spans }}",
+            "model_name": "={{ $json.model_name }}",
+            "prompt_version": "={{ $json.prompt_version }}",
+            "rules_to_refine": "={{ $json.rules_to_refine }}",
+            "minimal_prompt_patch": "={{ $json.minimal_prompt_patch }}",
+            "confidence_before_search": "={{ $json.confidence_before_search }}",
+            "confidence_after_search": "={{ $json.confidence_after_search }}",
+            "decision_rules_triggered": "={{ $json.decision_rules_triggered }}",
+            "reply_draft_short": "={{ $json.reply_draft_short }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "dedup_key",
+              "displayName": "dedup_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "gmail_id",
+              "displayName": "gmail_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "thread_id",
+              "displayName": "thread_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "message_id",
+              "displayName": "message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "received_at",
+              "displayName": "received_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "from",
+              "displayName": "from",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "to",
+              "displayName": "to",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "cc",
+              "displayName": "cc",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "subject",
+              "displayName": "subject",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "snippet",
+              "displayName": "snippet",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "primary_label",
+              "displayName": "primary_label",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "secondary_labels",
+              "displayName": "secondary_labels",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "importance_score",
+              "displayName": "importance_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "is_important",
+              "displayName": "is_important",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "deadline_utc",
+              "displayName": "deadline_utc",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "key_points",
+              "displayName": "key_points",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "suggested_actions",
+              "displayName": "suggested_actions",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "thread_hint",
+              "displayName": "thread_hint",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "header_flags",
+              "displayName": "header_flags",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "source_mailbox",
+              "displayName": "source_mailbox",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "body_preview",
+              "displayName": "body_preview",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "confidence",
+              "displayName": "confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "label_probs",
+              "displayName": "label_probs",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "second_best_label",
+              "displayName": "second_best_label",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "second_best_reason",
+              "displayName": "second_best_reason",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "explanation",
+              "displayName": "explanation",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "reply_deadline_hint_utc",
+              "displayName": "reply_deadline_hint_utc",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "action_required",
+              "displayName": "action_required",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "action_type",
+              "displayName": "action_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "entities",
+              "displayName": "entities",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ids_extracted",
+              "displayName": "ids_extracted",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "phones_emails",
+              "displayName": "phones_emails",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "language",
+              "displayName": "language",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "urls",
+              "displayName": "urls",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "needs_web_search",
+              "displayName": "needs_web_search",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "used_web_search",
+              "displayName": "used_web_search",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "search_needed_reason",
+              "displayName": "search_needed_reason",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "search_queries",
+              "displayName": "search_queries",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "domain_to_check",
+              "displayName": "domain_to_check",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "web_result_urls",
+              "displayName": "web_result_urls",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "web_search_summary",
+              "displayName": "web_search_summary",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "phishing_risk_score",
+              "displayName": "phishing_risk_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "phishing_signals",
+              "displayName": "phishing_signals",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "header_interpretation",
+              "displayName": "header_interpretation",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "uncertainty_reasons",
+              "displayName": "uncertainty_reasons",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "evidence_spans",
+              "displayName": "evidence_spans",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "model_name",
+              "displayName": "model_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "prompt_version",
+              "displayName": "prompt_version",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "rules_to_refine",
+              "displayName": "rules_to_refine",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "minimal_prompt_patch",
+              "displayName": "minimal_prompt_patch",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "confidence_before_search",
+              "displayName": "confidence_before_search",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "confidence_after_search",
+              "displayName": "confidence_after_search",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "decision_rules_triggered",
+              "displayName": "decision_rules_triggered",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "reply_draft_short",
+              "displayName": "reply_draft_short",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -512,
+        1408
+      ],
+      "id": "0f56066e-49e0-40f7-99c1-179e2e5f6f39",
+      "name": "emails_index",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "removeLabels",
+        "messageId": "={{ $node[\"Extract Email Fields\"].json[\"gmail_id\"] }}",
+        "labelIds": [
+          "IMPORTANT",
+          "INBOX"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        -64,
+        1216
+      ],
+      "id": "62f2fd09-ac47-49ee-87a6-f85ac44d642a",
+      "name": "Remove Label1",
+      "webhookId": "964ad212-a0d6-49e4-a492-0e327cf70633"
+    },
+    {
+      "parameters": {
+        "operation": "removeLabels",
+        "messageId": "={{ $node[\"Extract Email Fields\"].json[\"gmail_id\"] }}",
+        "labelIds": [
+          "IMPORTANT",
+          "INBOX"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        608,
+        2176
+      ],
+      "id": "9179802b-2cdd-4e96-a857-099e1ea3b9c4",
+      "name": "Remove Label4",
+      "webhookId": "94425b4a-a868-40d1-82a3-1d69d681c6b5"
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        384,
+        2176
+      ],
+      "id": "53486d45-5838-4e73-ae46-0d867abda8d0",
+      "name": "Wait2",
+      "webhookId": "38b6c89e-be15-4ce8-a720-d28eb41f51c5"
+    },
+    {
+      "parameters": {
+        "operation": "removeLabels",
+        "messageId": "={{ $node[\"Extract Email Fields\"].json[\"gmail_id\"] }}",
+        "labelIds": [
+          "IMPORTANT",
+          "INBOX"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        608,
+        2560
+      ],
+      "id": "782500cf-3ad4-4cb8-a7de-9798656885c2",
+      "name": "Remove Label5",
+      "webhookId": "8f12990d-c26b-49ba-a073-ddebaa053ac8"
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        384,
+        2560
+      ],
+      "id": "b281e809-008d-4c6e-af47-655d2881f61b",
+      "name": "Wait3",
+      "webhookId": "0aebedf2-431c-4b60-88a3-453d8cdb97bd"
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -64,
+        1600
+      ],
+      "id": "081683a1-41fb-464e-a942-69ce4ca9c990",
+      "name": "Wait",
+      "webhookId": "5cee7234-737e-446b-bce7-4b53c9e36683"
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -64,
+        1792
+      ],
+      "id": "51fc205e-a87f-4c5f-a8d9-a7e837152c7f",
+      "name": "Wait1",
+      "webhookId": "4f5ad946-ea23-441d-bd89-2f8cdf55dc48"
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -64,
+        1984
+      ],
+      "id": "d24da415-e8d4-462b-bdac-056effe6e2c3",
+      "name": "Wait4",
+      "webhookId": "238a4b9d-d323-4fcf-97d1-56225d2b9581"
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -64,
+        2176
+      ],
+      "id": "e7ccc02b-aaa4-4b29-87d9-044b0605797f",
+      "name": "Wait5",
+      "webhookId": "194a1f08-6260-460b-972a-3a1d8845d5d8"
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -64,
+        2368
+      ],
+      "id": "bec175c3-d9f8-419a-919c-8fe76cb15f24",
+      "name": "Wait6",
+      "webhookId": "f763c523-00e0-47d7-9104-f3ffee306a48"
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -64,
+        2560
+      ],
+      "id": "63021253-67c4-4829-a5a4-b62341362261",
+      "name": "Wait7",
+      "webhookId": "a91938b9-2807-43bd-859a-323cf74d4c57"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "37889522-74b0-4189-b0fb-a2156ad8a667",
+              "leftValue": "={{ $json.action_required}}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -736,
+        832
+      ],
+      "id": "fb898cb8-0e2d-4535-b037-5f1a301a0c85",
+      "name": "Action Required?"
+    },
+    {
+      "parameters": {
+        "task": "MDk1NTk3ODgzODQ4NDAyMzE5NDU6MDow",
+        "title": "={{ $node[\"Extract Email Fields\"].json.subject\n   || ($json.suggested_actions || [])[0]\n   || \"Follow up\" }}",
+        "additionalFields": {
+          "notes": "={{ [\n  ...($json.suggested_actions || []).map(a => '• ' + a),\n  (($json.evidence_spans || [])[0] || {}).quote,\n  (($json.evidence_spans || [])[1] || {}).quote,\n  $json.snippet,\n  $json.gmail_link\n].filter(Boolean).join('\\n') }}\n"
+        }
+      },
+      "type": "n8n-nodes-base.googleTasks",
+      "typeVersion": 1,
+      "position": [
+        -512,
+        832
+      ],
+      "id": "e9aaf37f-4854-4920-923f-3301cdd9cdcb",
+      "name": "Create a task"
+    }
+  ],
+  "connections": {
+    "Gmail Get Full": {
+      "main": [
+        [
+          {
+            "node": "Extract Email Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Email Fields": {
+      "main": [
+        [
+          {
+            "node": "Set (IDs)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set (IDs)": {
+      "main": [
+        [
+          {
+            "node": "GS Get Row (by dedup_key)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GS Get Row (by dedup_key)": {
+      "main": [
+        [
+          {
+            "node": "Lookup → Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse LLM JSON": {
+      "main": [
+        [
+          {
+            "node": "Web Search?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Brave Search": {
+      "main": [
+        [
+          {
+            "node": "Summarize Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarize Results": {
+      "main": [
+        [
+          {
+            "node": "Gemini - Final Classification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Final JSON": {
+      "main": [
+        [
+          {
+            "node": "Spam?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Action Required?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply SPAM": {
+      "main": [
+        [
+          {
+            "node": "Remove Label",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Priority + Pending": {
+      "main": [
+        [
+          {
+            "node": "Wait1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Priority": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Admin": {
+      "main": [
+        [
+          {
+            "node": "Wait4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Newsletter": {
+      "main": [
+        [
+          {
+            "node": "Wait5",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finance": {
+      "main": [
+        [
+          {
+            "node": "Wait6",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Push Text": {
+      "main": [
+        [
+          {
+            "node": "User_Key",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Gmail Get Full",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Urgent?": {
+      "main": [
+        [
+          {
+            "node": "Build Push Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Web Search?": {
+      "main": [
+        [
+          {
+            "node": "Brave Search",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Spam?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Action Required?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Spam?": {
+      "main": [
+        [
+          {
+            "node": "Apply SPAM",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "LLM full Log",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "emails_index",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Switch",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "LLM full Log",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "emails_index",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify with OpenAI": {
+      "main": [
+        [
+          {
+            "node": "Parse LLM JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lookup → Found?": {
+      "main": [
+        [
+          {
+            "node": "Already Processed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Already Processed?": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Gemini - Classification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Remove Label": {
+      "main": [
+        [
+          {
+            "node": "Remove Label1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch": {
+      "main": [
+        [
+          {
+            "node": "Priority + Pending",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Priority",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Admin",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Newsletter",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finance",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fallback Label",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fallback Label": {
+      "main": [
+        [
+          {
+            "node": "Wait7",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "First Item?": {
+      "main": [
+        [
+          {
+            "node": "List Labels",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Labels": {
+      "main": [
+        [
+          {
+            "node": "Labels: Missing",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "List Labels Final",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Labels: Missing": {
+      "main": [
+        [
+          {
+            "node": "Create Label",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Label": {
+      "main": [
+        [
+          {
+            "node": "List Labels Final",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Labels Final": {
+      "main": [
+        [
+          {
+            "node": "Map",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Map": {
+      "main": [
+        [
+          {
+            "node": "No-op (skip)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize Classification": {
+      "main": [
+        [
+          {
+            "node": "Parse Final JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "User_Key": {
+      "main": [
+        [
+          {
+            "node": "Pushover (Urgent)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini - Classification": {
+      "main": [
+        [
+          {
+            "node": "Parse LLM JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini - Final Classification": {
+      "main": [
+        [
+          {
+            "node": "Parse Final JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM full Log": {
+      "main": [
+        []
+      ]
+    },
+    "First Time Running": {
+      "main": [
+        [
+          {
+            "node": "First Item?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "emails_index": {
+      "main": [
+        [
+          {
+            "node": "Urgent?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Remove label from important message2": {
+      "main": [
+        []
+      ]
+    },
+    "Wait2": {
+      "main": [
+        [
+          {
+            "node": "Remove Label4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Remove label from message": {
+      "main": [
+        [
+          {
+            "node": "Wait2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait3": {
+      "main": [
+        [
+          {
+            "node": "Remove Label5",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Remove label from important message3": {
+      "main": [
+        []
+      ]
+    },
+    "Remove label from message1": {
+      "main": [
+        [
+          {
+            "node": "Wait3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Remove label from important message1": {
+      "main": [
+        []
+      ]
+    },
+    "Remove label from important message": {
+      "main": [
+        []
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "Remove label from important message1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait1": {
+      "main": [
+        [
+          {
+            "node": "Remove label from important message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait4": {
+      "main": [
+        [
+          {
+            "node": "Remove label from important message2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait5": {
+      "main": [
+        [
+          {
+            "node": "Remove label from message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait6": {
+      "main": [
+        [
+          {
+            "node": "Remove label from important message3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait7": {
+      "main": [
+        [
+          {
+            "node": "Remove label from message1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Action Required?": {
+      "main": [
+        [
+          {
+            "node": "Create a task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "tRG14eUeAPUkb8m6",
+    "saveExecutionProgress": true,
+    "timezone": "America/Toronto"
+  },
+  "versionId": "4b3415df-7e1c-411b-b107-22629939c416",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "35f763533b192afb2b45e179f03af77595a5737d95c99d9494061131a755e7a3"
+  },
+  "id": "0YLhW7El87dFvS9L",
+  "tags": []
+}
